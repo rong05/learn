@@ -56,7 +56,7 @@
 
 若 RTP 固定头中的扩展比特位置 1，则一个长度可变的头扩展部分被加到 RTP 固定头之后，其格式如下：
 
-![rtp_header_extension](/Users/wangxueke/Documents/av-learn/img/rtp_header_extension.png)
+![rtp_header_extension](./img/rtp_header_extension.png)
 
 ​	头扩展包含 16 比特的长度域，指示扩展项中 32 比特字的个数，不包括 4 个字节扩展头(因此零是有效值)。RTP 固定头之后只允许有一个头扩展。为允许多个互操作实现独立生成不同的头扩展，或某种特定实现有多种不同的头扩展,扩展项的前 16 比特用以识别标识符或参数。这 16 比特的格式由具体实现的上层协议定义。基本的 RTP 说明并不定义任何头扩展本身。
 
