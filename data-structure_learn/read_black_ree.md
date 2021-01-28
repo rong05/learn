@@ -104,3 +104,107 @@ static void __rb_rotate_right(struct rb_node *node, struct rb_root *root)
 
 ​		首先在增加节点时，将其标记成红色，如果设置为黑色就会导致根到叶子的路径上有一条路上，多一个额外的黑节点，这个是很难调整的。但是设为红色节点后，可能会导致出现两个连续红色节点的冲突，那么可以通过颜色调换（color flips）和树旋转来调整。
 
+流程图如下：
+
+![rb_tree_install](./img/rb_tree_install.png)
+
+实现代码
+
+```c
+void rb_insert_color(struct rb_node *node, struct rb_root *root)//已经查找到相应的位置，进行重新调整平衡
+{
+	struct rb_node *parent, *gparent;
+
+	while ((parent = rb_parent(node)) && rb_is_red(parent))//取出父亲节点，并父亲节点是红色的时候
+	{
+		gparent = rb_parent(parent);//获取祖父节点
+
+		if (parent == gparent->rb_left)//如果父亲节点是在祖父节点左侧
+		{
+			{
+				register struct rb_node *uncle = gparent->rb_right;
+				if (uncle && rb_is_red(uncle))//存在在叔叔节点，父亲节点和叔叔节点都为红色，当父亲节点在祖父节点左侧
+				{
+					rb_set_black(uncle);//将父亲节点和叔叔节点都置为黑色
+					rb_set_black(parent);
+					rb_set_red(gparent);//再将祖父节点置为红色 （保持性质5）
+					node = gparent;//将祖父节点当成是新加入的节点进行各种情形的檢查
+					continue;
+				}
+			}
+
+      //情形4、当父亲节点为红色，叔叔节点缺失或为黑色，新节点为其父亲节点的右侧时，其父亲节点在祖父节点左侧
+			if (parent->rb_right == node)
+			{
+				register struct rb_node *tmp;
+				__rb_rotate_left(parent, root);//针对父亲节点进行一次左旋转，并将新节点位置和其父亲节点位置进行交换
+				tmp = parent;
+				parent = node;
+				node = tmp;
+			}
+      //完成情况4，还需解决仍然失效的性质4；
+      //情形5、将父亲节点置为黑色，在将祖父节点置为红色，并针对祖父节点进行一次右旋转，使其结果满足性质4
+			rb_set_black(parent);
+			rb_set_red(gparent);
+			__rb_rotate_right(gparent, root);
+		} else {//如果父亲节点是在祖父节点右侧，
+     
+			{
+				register struct rb_node *uncle = gparent->rb_left;
+				if (uncle && rb_is_red(uncle))//存在在叔叔节点，父亲节点和叔叔节点都为红色，当父亲节点在祖父节点右侧
+				{
+					rb_set_black(uncle);//将父亲节点和叔叔节点都置为黑色
+					rb_set_black(parent);
+					rb_set_red(gparent);//再将祖父节点置为红色 （保持性质5）
+					node = gparent;//将祖父节点当成是新加入的节点进行各种情形的檢查
+					continue;
+				}
+			}
+ 			//因为父亲节点是在祖父节点右侧，情形4和情形5中的左和右应当对调。
+			if (parent->rb_left == node)
+			{
+				register struct rb_node *tmp;
+				__rb_rotate_right(parent, root);
+				tmp = parent;
+				parent = node;
+				node = tmp;
+			}
+
+			rb_set_black(parent);
+			rb_set_red(gparent);
+			__rb_rotate_left(gparent, root);
+		}
+	}
+
+	rb_set_black(root->rb_node);//将根节点设置为黑色（保持性质2）
+}
+```
+
+#### 情况一
+
+​		新节点在树的根节点上，只需将根节点重置为黑色，保持性质2。
+
+#### 情况二
+
+​		新节点的父亲节点为黑色，所以性质4没有失效，由于每次新增加的节点都为红色，尽管新节点存在两个黑色叶子节点，但是通過它的每个子节点的路径和它所取代的黑色的叶子的路径具有相同数目的黑色节点，所以满足性质5
+
+#### 情况三
+
+​		存在在叔叔节点，父亲节点和叔叔节点都为红色，将父亲节点和叔叔节点都置为黑色，再将祖父节点置为红色 ，这样就保持了性质5；紅色的祖父节点可能是根节点，这就违反了性质2，也有可能祖父节点的父节点是紅色的，这就违反了性质4；这种情况下需将祖父节点当成是新加入的节点进行各种情形的檢查。
+
+![](./img/Red-black_tree_insert_case_3.png)
+
+**注意：***<u>在余下的情形下，假设父亲节点是在祖父节点左侧，如果父亲节点是在祖父节点右侧，情形4和情形5中的左和右应当对调。</u>*
+
+#### 情况四
+
+​		当父亲节点为红色，叔叔节点缺失或为黑色，新节点为其父亲节点的右侧时，其父亲节点在祖父节点左侧；针对父亲节点进行一次左旋转，并将新节点位置和其父亲节点位置进行交换；完成这种情况后，还需解决仍然失效的性质4，那就进行情况5处理；
+
+![](./img/Red-black_tree_insert_case_4.png)
+
+#### 情况5
+
+​		当父亲节点为红色，叔叔节点缺失或为黑色，新节点为其父亲节点的左侧时，其父亲节点在祖父节点左侧；将父亲节点置为黑色，在将祖父节点置为红色，并针对祖父节点进行一次右旋转，使其结果满足性质4；性质5也仍然保持滿足，因为通过这三個节点中任何一個的所有路径以前都通过祖父节点，現在它們都通过以前的父节点。在各自的情形下，这都是三个节点中唯一的黑色节点。
+
+![](/Users/wangxueke/learn/data-structure_learn/img/Red-black_tree_insert_case_5.png)
+
