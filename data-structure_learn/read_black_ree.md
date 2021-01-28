@@ -206,5 +206,5 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root)//已经查找�
 
 ​		当父亲节点为红色，叔叔节点缺失或为黑色，新节点为其父亲节点的左侧时，其父亲节点在祖父节点左侧；将父亲节点置为黑色，在将祖父节点置为红色，并针对祖父节点进行一次右旋转，使其结果满足性质4；性质5也仍然保持滿足，因为通过这三個节点中任何一個的所有路径以前都通过祖父节点，現在它們都通过以前的父节点。在各自的情形下，这都是三个节点中唯一的黑色节点。
 
-![](/Users/wangxueke/learn/data-structure_learn/img/Red-black_tree_insert_case_5.png)
+![](./img/Red-black_tree_insert_case_5.png)
 
