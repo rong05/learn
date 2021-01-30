@@ -425,7 +425,7 @@ static void __rb_erase_color(struct rb_node *node, struct rb_node *parent,
 
 [维基百科](https://zh.wikipedia.org/wiki/%E7%BA%A2%E9%BB%91%E6%A0%91)
 
- [Linux内核实现的红黑树](https://www.jianshu.com/p/e136ec79235c)
+ [Linux内核实现的红黑树](https://github.com/forhappy/rbtree)
 
 [某大神](https://www.jianshu.com/p/e136ec79235c)
 
