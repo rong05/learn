@@ -276,7 +276,9 @@ read_thread的函数比较长，这里不贴完整代码，直接根据其功能
 3. `av_find_best_stream`
 4. `stream_component_open`
 
-**`avformat_open_input`**用于打开输入流（这个包括文件和网络流，在ffmpeg内部会把每一个协议封装成`URLProtocol`，文件对于ffmpeg也是一种协议“file”）
+###### **`avformat_open_input`**
+
+该函数用于打开输入流（这个包括文件和网络流，在ffmpeg内部会把每一个协议封装成`URLProtocol`，文件对于ffmpeg也是一种协议“file”）
 
 ```c
     ic = avformat_alloc_context(); //创建 AVformatContext
@@ -305,7 +307,9 @@ read_thread的函数比较长，这里不贴完整代码，直接根据其功能
 
 重点强调：**`interrupt_callback`**用于ffmpeg内部在执行耗时操作时检查是否有退出请求，并提前中断，避免用户退出请求没有及时响应；
 
-**`avformat_find_stream_info`**函数是通过读取媒体文件的部分数据来分析流信息；在一些缺少头信息的封装下特别有用，如注释：
+###### **`avformat_find_stream_info`**
+
+该函数是通过读取媒体文件的部分数据来分析流信息；在一些缺少头信息的封装下特别有用，如注释：
 
 ```c
 Read packets of a media file to get stream information. This
@@ -316,7 +320,9 @@ The logical file position is not changed by this function;
 examined packets may be buffered for later processing.
 ```
 
-**`av_find_best_stream`**函数选择对应的媒体流，ffplay主要通过下述注释中的3个参数找到“最佳流”；
+###### **`av_find_best_stream`**
+
+该函数选择对应的媒体流，ffplay主要通过下述注释中的3个参数找到“最佳流”；
 
 ```c
 int av_find_best_stream(AVFormatContext *ic,
@@ -327,7 +333,9 @@ int av_find_best_stream(AVFormatContext *ic,
                         int flags);
 ```
 
-**`stream_component_open`**函数是根据目标流打开对应的解码器；`stream_component_open`的函数内容比较长，接下来就逐步分析一下ffplay是如何打开解码器的：
+###### **`stream_component_open`**
+
+该函数是根据目标流打开对应的解码器；`stream_component_open`的函数内容比较长，接下来就逐步分析一下ffplay是如何打开解码器的：
 
 1. 创建和初始化`AVCodecContex`，然后通过`avcodec_parameters_to_context`把所选流的解码参数赋给`avctx`，最后设了`time_base`.代码如下：
 
@@ -533,5 +541,224 @@ int av_find_best_stream(AVFormatContext *ic,
             av_packet_unref(pkt);
         }
     }
+```
+
+###### 暂停/恢复处理：
+
+```c
+if (is->paused != is->last_paused) {//如果paused变量改变，说明暂停状态改变
+    is->last_paused = is->paused;
+    if (is->paused)//如果暂停调用av_read_pause
+        is->read_pause_return = av_read_pause(ic);
+    else//如果恢复播放调用av_read_play
+        av_read_play(ic);
+}
+```
+
+ffmpeg有专门针对暂停和恢复的函数，所以直接调用就可以了。
+
+###### seek的处理：
+
+主要的seek操作通过avformat_seek_file完成。根据avformat_seek_file的返回值，如果seek成功，需要：
+
+1. 清除PacketQueue的缓存，并放入一个flush_pkt。放入的flush_pkt可以让PacketQueue的serial增1，以区分seek前后的数据;(在分析PacketQueue会详细说明)
+2. 同步外部时钟；（在音视频同步部分会详细说明）
+3. 最后清理一些变量，通过`step_to_next_frame`完成
+
+```c
+ 						ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
+            if (ret < 0)
+            {
+                av_log(NULL, AV_LOG_ERROR,
+                       "%s: error while seeking\n", is->ic->url);
+            }
+            else
+            {
+                //清空缓冲队列，向解码线程传入flush事件
+                if (is->audio_stream >= 0)
+                {
+                    packet_queue_flush(&is->audioq);
+                    packet_queue_put(&is->audioq, &flush_pkt);
+                }
+                if (is->subtitle_stream >= 0)
+                {
+                    packet_queue_flush(&is->subtitleq);
+                    packet_queue_put(&is->subtitleq, &flush_pkt);
+                }
+                if (is->video_stream >= 0)
+                {
+                    packet_queue_flush(&is->videoq);
+                    packet_queue_put(&is->videoq, &flush_pkt);
+                }
+              	//同步外部时钟信号
+                if (is->seek_flags & AVSEEK_FLAG_BYTE)
+                {
+                    set_clock(&is->extclk, NAN, 0);
+                }
+                else
+                {
+                    set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
+                }
+            }
+            is->seek_req = 0;
+            is->queue_attachments_req = 1;
+            is->eof = 0;
+            if (is->paused)
+                step_to_next_frame(is);
+```
+
+###### 缓冲区大小判断：
+
+缓冲区大小满的情况判断有两种：
+
+1. 所有流队列缓冲大小总和大于MAX_QUEUE_SIZE（15M）时；
+2. 各种流的队列都已有够用的包；
+
+```c
+/* if the queue are full, no need to read more */ //数据队列满的情况
+        if (infinite_buffer < 1 &&
+            (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE //所有流队列缓冲大小总和大于MAX_QUEUE_SIZE（15M）时
+            || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) //各种流都已有够用的包
+            &&stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) 
+            &&stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq))))
+        {
+            /* wait 10 ms */
+            SDL_LockMutex(wait_mutex);
+            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            SDL_UnlockMutex(wait_mutex);
+            continue;
+        }
+```
+
+在看看函数`stream_has_enough_packets`是如何判断流队列都已有够用的包
+
+```c
+static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *queue)
+{
+    return stream_id < 0 ||
+           queue->abort_request ||
+           (st->disposition & AV_DISPOSITION_ATTACHED_PIC) ||
+           queue->nb_packets > MIN_FRAMES && (!queue->duration || av_q2d(st->time_base) * queue->duration > 1.0);
+}
+```
+
+从函数内部结构可以看出，在满足PacketQueue总时长为0，或总时长超过1s的前提下：
+
+有这么几种情况包是够用的：
+
+1. 流没有打开（stream_id < 0）
+2. 有退出请求（queue->abort_request）
+3. 配置了AV_DISPOSITION_ATTACHED_PIC，流以附件图片/“封面图片”的形式存储在文件；
+4. 队列内包个数大于MIN_FRAMES（=25）
+
+###### 在播放完的情况下处理：
+
+```c
+    if (!is->paused &&
+            (!is->audio_st || (is->auddec.finished == is->audioq.serial 
+                               && frame_queue_nb_remaining(&is->sampq) == 0)) 
+        											&&(!is->video_st || (is->viddec.finished == is->videoq.serial 
+                             && frame_queue_nb_remaining(&is->pictq) == 0)))
+        {
+            if (loop != 1 && (!loop || --loop))
+            {
+                stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+            }
+            else if (autoexit)
+            {
+                ret = AVERROR_EOF;
+                goto fail;
+            }
+        }
+```
+
+判断播放已完成的条件，需要满足：
+
+1. 不在暂停状态
+2. 音频未打开，或者打开了，但是解码已解码完毕，serial等于PacketQueue的serial，并且PacketQueue中没有节点了
+3. 视频未打开，或者打开了，但是解码已解码完毕，serial等于PacketQueue的serial，并且PacketQueue中没有节点了
+
+在确认已结束的情况下，用户有两个变量可以控制播放器行为：
+
+1. loop: 控制播放次数（当前这次也算在内，也就是最小就是1次了），0表示无限次
+2. autoexit：自动退出，也就是播放完成后自动退出。
+
+###### 读（解复用）处理：
+
+解复用处理的步骤如下：
+
+1. 通过`av_read_frame`读取一个包（`AVPacket`）
+2. 返回值处理，一些出错处理过程
+3. `pkt_ts`重计算过程
+4. `packet_queue_put`放入各自队列，或者丢弃
+
+```c
+ ret = av_read_frame(ic, pkt); //将数据读取出，送入队列
+        if (ret < 0)
+        {
+             //文件读取完了，调用packet_queue_put_nullpacket通知解码线程
+            if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof)
+            {
+                if (is->video_stream >= 0)
+                    packet_queue_put_nullpacket(&is->videoq, is->video_stream);
+                if (is->audio_stream >= 0)
+                    packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
+                if (is->subtitle_stream >= 0)
+                    packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
+                is->eof = 1;
+            }
+            //发生错误了，退出主循环
+            if (ic->pb && ic->pb->error)
+            {
+                if (autoexit)
+                    goto fail;
+                else
+                    break;
+            }
+            /*读取失败的话，读取失败的原因有很多，其他地方可能会重新Signal这个锁condition。
+            如果没有singal这个condition的话，就会等待10ms之后，
+            再释放，重新循环读取. 那这个continue_read_thread 到底是锁了哪呢？*/
+            SDL_LockMutex(wait_mutex);
+            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            SDL_UnlockMutex(wait_mutex);
+            continue;
+        }
+        else
+        {
+            is->eof = 0;
+        }
+        /* check if packet is in play range specified by user, then queue, otherwise discard */
+        //记录stream_start_time
+        stream_start_time = ic->streams[pkt->stream_index]->start_time;
+        //如果没有pts, 就用dts
+        pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+        /*判断是否在范围内。如果duration还没被定义的话，通过
+        或者在定义的duration内才可以，用当前的pts-start_time .
+        duration 会在解码器打开之后，才会被初始化*/
+        pkt_in_play_range = duration == AV_NOPTS_VALUE ||
+                            (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) *
+                                        av_q2d(ic->streams[pkt->stream_index]->time_base) -
+                                    (double)(start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000 <=
+                                ((double)duration / 1000000);
+        // 将解复用得到的数据包添加到对应的待解码队列中
+        if (pkt->stream_index == is->audio_stream && pkt_in_play_range)
+        {
+            packet_queue_put(&is->audioq, pkt);
+        }
+        else if (pkt->stream_index == is->video_stream 
+                 && pkt_in_play_range 
+                 && !(is->video_st->disposition 
+                      & AV_DISPOSITION_ATTACHED_PIC))
+        {
+            packet_queue_put(&is->videoq, pkt);
+        }
+        else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range)
+        {
+            packet_queue_put(&is->subtitleq, pkt);
+        }
+        else
+        {
+            av_packet_unref(pkt);
+        }
 ```
 
