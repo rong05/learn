@@ -104,11 +104,11 @@ int main(int argc, char **argv)
 }
 ```
 
-而这里我们主要的两个函数是stream_open和event_loop；stream_open函数的作用是创建read_thread，read_thread会打开文件，解析封装，获取AVStream信息，启动解码器（创建解码线程），并开始读取文件；event_loop函数的作用是处理SDL事件队列中的事件和刷新显示数据，下面会针对这两个函数视频部分的内容进行详细说明。
+而这里我们主要的两个函数是`stream_open`和`event_loop`；`stream_open`函数的作用是创建`read_thread`，`read_thread`会打开文件，解析封装，获取`AVStream`信息，启动解码器（创建解码线程），并开始读取文件；`event_loop`函数的作用是处理SDL事件队列中的事件和刷新显示数据，下面会针对这两个函数视频部分的内容进行详细说明。
 
 #### stream_open
 
-其实在stream_open函数里的关键内容都是初始化一些参数，主要的处理逻辑在read_thread中进行。
+其实在`stream_open`函数里的关键内容都是初始化一些参数，主要的处理逻辑在`read_thread`中进行。
 
 ```c
 static VideoState *stream_open(const char *filename, AVInputFormat *iformat)
@@ -141,7 +141,7 @@ static VideoState *stream_open(const char *filename, AVInputFormat *iformat)
 }
 ```
 
-VideoState结构的参数详细说明：
+**`VideoState`**结构的参数详细说明：
 
 ```c
 /*视频状态器，贯穿整个ffplay的结构*/
@@ -258,7 +258,7 @@ typedef struct VideoState
 } VideoState;
 ```
 
-#### 读取线程`read_thread`
+#### 读取线程(read_thread)
 
 read_thread主要按以下步骤执行：
 
@@ -266,4 +266,272 @@ read_thread主要按以下步骤执行：
 2. 主循环读数据，解封装：读取Packet，存入PacketQueue
 
 read_thread的函数比较长，这里不贴完整代码，直接根据其功能分步分析。
+
+##### 准备阶段
+
+主要执行一下几个步骤的函数：
+
+1. `avformat_open_input`
+2. `avformat_find_stream_info`
+3. `av_find_best_stream`
+4. `stream_component_open`
+
+**`avformat_open_input`**用于打开输入流（这个包括文件和网络流，在ffmpeg内部会把每一个协议封装成`URLProtocol`，文件对于ffmpeg也是一种协议“file”）
+
+```c
+    ic = avformat_alloc_context(); //创建 AVformatContext
+    if (!ic)
+    {
+        av_log(NULL, AV_LOG_FATAL, "Could not allocate context.\n");
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
+    //设置解码中断回调方法 ，这很重要，在网络中断的时候，发生调用；不设置很容易造成阻塞
+    ic->interrupt_callback.callback = decode_interrupt_cb;
+    ic->interrupt_callback.opaque = is;
+    if (!av_dict_get(format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE))
+    {
+        av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+        scan_all_pmts_set = 1;
+    }
+    err = avformat_open_input(&ic, is->filename, is->iformat, &format_opts); //打开文件或网络流
+    if (err < 0)
+    {
+        print_error(is->filename, err);
+        ret = -1;
+        goto fail;
+    }
+```
+
+重点强调：**`interrupt_callback`**用于ffmpeg内部在执行耗时操作时检查是否有退出请求，并提前中断，避免用户退出请求没有及时响应；
+
+**`avformat_find_stream_info`**函数是通过读取媒体文件的部分数据来分析流信息；在一些缺少头信息的封装下特别有用，如注释：
+
+```c
+Read packets of a media file to get stream information. This
+is useful for file formats with no headers such as MPEG. This
+function also computes the real framerate in case of MPEG-2 repeat
+rame mode.
+The logical file position is not changed by this function;
+examined packets may be buffered for later processing.
+```
+
+**`av_find_best_stream`**函数选择对应的媒体流，ffplay主要通过下述注释中的3个参数找到“最佳流”；
+
+```c
+int av_find_best_stream(AVFormatContext *ic,
+                        enum AVMediaType type,//要选择的流类型
+                        int wanted_stream_nb,//目标流索引
+                        int related_stream,//参考流索引
+                        AVCodec **decoder_ret,
+                        int flags);
+```
+
+**`stream_component_open`**函数是根据目标流打开对应的解码器；`stream_component_open`的函数内容比较长，接下来就逐步分析一下ffplay是如何打开解码器的：
+
+1. 创建和初始化`AVCodecContex`，然后通过`avcodec_parameters_to_context`把所选流的解码参数赋给`avctx`，最后设了`time_base`.代码如下：
+
+```c
+   //创建编解码器上下文
+    avctx = avcodec_alloc_context3(NULL);
+    if (!avctx)
+        return AVERROR(ENOMEM);
+    //从找到对应的流中的codecpar，codecpar其实是avcodec_parameters，
+    // 然后将它完全复制到创建的AVCodecContext
+    ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar);
+    if (ret < 0)
+        goto fail;
+    avctx->pkt_timebase = ic->streams[stream_index]->time_base;
+```
+
+2. 通过`avcodec_find_decoder`找到对应的解码器（`AVCodec`）,如果用户设置了`forced_codec_name`，则通过`avcodec_find_decoder_by_name`找到对应的解码器；在找到解码器后通过`avcodec_open2`是否能打开解码器
+
+   ```c
+       codec = avcodec_find_decoder(avctx->codec_id); //找到对应的解码器
+   
+       switch (avctx->codec_type)
+       {
+       case AVMEDIA_TYPE_AUDIO:
+           is->last_audio_stream = stream_index;
+           forced_codec_name = audio_codec_name;
+           break;
+       case AVMEDIA_TYPE_SUBTITLE:
+           is->last_subtitle_stream = stream_index;
+           forced_codec_name = subtitle_codec_name;
+           break;
+       case AVMEDIA_TYPE_VIDEO:
+           is->last_video_stream = stream_index;
+           forced_codec_name = video_codec_name;
+           break;
+       }
+   
+       //通过编码器的名字，来打开对应的解码器
+       if (forced_codec_name)
+           codec = avcodec_find_decoder_by_name(forced_codec_name);
+       if (!codec)
+       {
+           if (forced_codec_name)
+               av_log(NULL, AV_LOG_WARNING,
+                      "No codec could be found with name '%s'\n", forced_codec_name);
+           else
+               av_log(NULL, AV_LOG_WARNING,
+                      "No decoder could be found for codec %s\n", avcodec_get_name(avctx->codec_id));
+           ret = AVERROR(EINVAL);
+           goto fail;
+       }
+   ...
+         //打开解码器
+       if ((ret = avcodec_open2(avctx, codec, &opts)) < 0)
+       {
+           goto fail;
+       }
+   ```
+
+3. 对于解码器特定参数的初始化和创建对应流的解码线程；（节选自AVMEDIA_TYPE_VIDEO分支）
+
+   ```c
+           is->video_stream = stream_index;
+           is->video_st = ic->streams[stream_index];
+   
+           decoder_init(&is->viddec, avctx, &is->videoq, is->continue_read_thread);
+           if ((ret = decoder_start(&is->viddec, video_thread, "video_decoder", is)) < 0)
+               goto out;
+           is->queue_attachments_req = 1;
+   ```
+
+   看看`decoder_init`和`decoder_start`两个函数的定义：
+
+   ```c
+   static void decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond *empty_queue_cond)
+   {
+       memset(d, 0, sizeof(Decoder));
+       d->avctx = avctx;
+       d->queue = queue;
+       d->empty_queue_cond = empty_queue_cond;
+       d->start_pts = AV_NOPTS_VALUE;
+       d->pkt_serial = -1;
+   }
+   
+   static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg)
+   {
+       packet_queue_start(d->queue);
+       d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
+       if (!d->decoder_tid)
+       {
+           av_log(NULL, AV_LOG_ERROR, "SDL_CreateThread(): %s\n", SDL_GetError());
+           return AVERROR(ENOMEM);
+       }
+       return 0;
+   }
+   ```
+
+   `decoder_init`比较简单，看`decoder_start`。`decoder_start`中“启动”了PacketQueue，并创建了一个名为"decoder"的线程专门用于解码，具体的解码流程由传入参数fn决定。比如对于视频，是`video_thread`。
+
+##### 主循环读数据
+
+在读线程中的主循环读数据阶段，主要的代码就`av_read_frame`和`packet_queue_put`，`av_read_frame`从文件中读取视频数据，并获取一个AVPacket，`packet_queue_put`把它放入到对应的PacketQueue中。
+
+```c
+    for (;;)
+    {
+        if (is->abort_request) //中断，结束播放
+            break;
+        if (is->paused != is->last_paused)//暂停/恢复的处理
+        {
+          ...
+        }
+       	if (is->seek_req)
+        { //跳帧请求
+         ...
+       	}
+      	   /* if the queue are full, no need to read more */ //数据队列满的情况
+        if (infinite_buffer < 1 &&
+            (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
+                                                                                         stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
+                                                                                         stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq))))
+        {
+            /* wait 10 ms */
+            SDL_LockMutex(wait_mutex);
+            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            SDL_UnlockMutex(wait_mutex);
+            continue;
+        }
+      //循环播放处理
+        if (!is->paused &&
+            (!is->audio_st || (is->auddec.finished == is->audioq.serial && frame_queue_nb_remaining(&is->sampq) == 0)) &&
+            (!is->video_st || (is->viddec.finished == is->videoq.serial && frame_queue_nb_remaining(&is->pictq) == 0)))
+        {
+            if (loop != 1 && (!loop || --loop))
+            {
+                stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+            }
+            else if (autoexit)
+            {
+                ret = AVERROR_EOF;
+                goto fail;
+            }
+        }
+        ret = av_read_frame(ic, pkt); //将数据读取出，送入队列
+        if (ret < 0)
+        {
+            if ((ret == AVERROR_EOF || avio_feof(ic->pb)) && !is->eof)
+            {
+                if (is->video_stream >= 0)
+                    packet_queue_put_nullpacket(&is->videoq, is->video_stream);
+                if (is->audio_stream >= 0)
+                    packet_queue_put_nullpacket(&is->audioq, is->audio_stream);
+                if (is->subtitle_stream >= 0)
+                    packet_queue_put_nullpacket(&is->subtitleq, is->subtitle_stream);
+                is->eof = 1;
+            }
+            if (ic->pb && ic->pb->error)
+            {
+                if (autoexit)
+                    goto fail;
+                else
+                    break;
+            }
+            /*读取失败的话，读取失败的原因有很多，其他地方可能会重新Signal这个锁condition。如果没有singal这个condition的话，就会等待10ms之后，
+            再释放，重新循环读取. 那这个continue_read_thread 到底是锁了哪呢？*/
+            SDL_LockMutex(wait_mutex);
+            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            SDL_UnlockMutex(wait_mutex);
+            continue;
+        }
+        else
+        {
+            is->eof = 0;
+        }
+        /* check if packet is in play range specified by user, then queue, otherwise discard */
+        //记录stream_start_time
+        stream_start_time = ic->streams[pkt->stream_index]->start_time;
+        //如果没有pts, 就用dts
+        pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+        /*判断是否在范围内。如果duration还没被定义的话，通过
+        或者在定义的duration内才可以，用当前的pts-start_time .
+        duration 会在解码器打开之后，才会被初始化*/
+        pkt_in_play_range = duration == AV_NOPTS_VALUE ||
+                            (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) *
+                                        av_q2d(ic->streams[pkt->stream_index]->time_base) -
+                                    (double)(start_time != AV_NOPTS_VALUE ? start_time : 0) / 1000000 <=
+                                ((double)duration / 1000000);
+        // 将解复用得到的数据包添加到对应的待解码队列中
+        if (pkt->stream_index == is->audio_stream && pkt_in_play_range)
+        {
+            packet_queue_put(&is->audioq, pkt);
+        }
+        else if (pkt->stream_index == is->video_stream && pkt_in_play_range && !(is->video_st->disposition & AV_DISPOSITION_ATTACHED_PIC))
+        {
+            packet_queue_put(&is->videoq, pkt);
+        }
+        else if (pkt->stream_index == is->subtitle_stream && pkt_in_play_range)
+        {
+            packet_queue_put(&is->subtitleq, pkt);
+        }
+        else
+        {
+            av_packet_unref(pkt);
+        }
+    }
+```
 
