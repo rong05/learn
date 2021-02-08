@@ -1,3 +1,5 @@
+[TOC]
+
 # ffplay源码分析
 
 熟悉FFmpeg项目从源码看起，以下是我阅读FFplay的源代码的总结；FFplay是FFmpeg项目提供的播放器示例，它的源代码的量也是不少的，其中很多知识点是我们可以学习和借鉴的。
@@ -761,4 +763,27 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
             av_packet_unref(pkt);
         }
 ```
+
+#### 视频解码线程(video_thread)
+
+在read_thread中已经创建了对应需要的解码器(`AVCodec`)；而在video_thread中需要创建`AVFrame`,来接收解码后的数据；确定视频帧率，开启循环解码；
+
+##### 参数初始化
+
+创建AVFrame和得到大致的视频帧率
+
+```c
+  VideoState *is = arg;
+    AVFrame *frame = av_frame_alloc(); //创建AVFrame
+    double pts;
+    double duration;
+    int ret;
+    AVRational tb = is->video_st->time_base;
+    //猜测视频帧率
+    AVRational frame_rate = av_guess_frame_rate(is->ic, is->video_st, NULL);
+		 if (!frame)
+        return AVERROR(ENOMEM);
+```
+
+##### 循环解码
 
