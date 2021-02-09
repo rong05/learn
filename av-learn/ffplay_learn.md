@@ -787,3 +787,223 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
 
 ##### 循环解码
 
+循环解码的总流：
+
+1. `get_video_frame`获取解码后的一帧图像
+2. “计算”时长和pts
+3. 调用`queue_picture`将一帧图像放入FrameQueue
+
+```c
+ for (;;)
+    {
+        ret = get_video_frame(is, frame);
+        if (ret < 0)
+            goto the_end;
+        if (!ret)
+            continue;
+            //获取当前帧播放时长
+            duration = (frame_rate.num && 
+                        frame_rate.den ? 
+                        av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+            //当前帧显示时间戳
+            pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+            // 将当前帧压入frame_queue
+            ret = queue_picture(is, frame, pts, duration, frame->pkt_pos, is->viddec.pkt_serial);
+            av_frame_unref(frame); //释放frame
+
+        if (ret < 0)
+            goto the_end;
+    }
+```
+
+###### `get_video_frame`
+
+​		调用`decoder_decode_frame`解码,获取成功后主要做丢帧处理，丢帧的主要条件是`diff - is->frame_last_filter_delay < 0`，`frame_last_filter_delay`与滤镜有关，可以先忽略，也就是`diff < 0`的时候丢帧——`pts < get_master_clock(is)`的时候丢帧。`decoder_decode_frame`真正解码函数；
+
+```c
+
+static int get_video_frame(VideoState *is, AVFrame *frame)
+{
+    int got_picture;
+
+    if ((got_picture = decoder_decode_frame(&is->viddec, frame, NULL)) < 0)
+        return -1;
+
+    if (got_picture)//解码是否成功，主要做丢帧处理
+    {
+        double dpts = NAN;
+
+        if (frame->pts != AV_NOPTS_VALUE)//通过 pts*av_q2d(timebase)可以得到准确的时间
+            dpts = av_q2d(is->video_st->time_base) * frame->pts;
+
+        //重新得到视频的比例
+        frame->sample_aspect_ratio = av_guess_sample_aspect_ratio(is->ic, is->video_st, frame);
+
+        if (framedrop > 0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER))
+        {
+            if (frame->pts != AV_NOPTS_VALUE)
+            {
+                //得到的是当前的时间和时间钟之间的差值。
+                double diff = dpts - get_master_clock(is);
+                if (!isnan(diff) && fabs(diff) < AV_NOSYNC_THRESHOLD &&
+                    diff - is->frame_last_filter_delay < 0 &&
+                    is->viddec.pkt_serial == is->vidclk.serial &&
+                    is->videoq.nb_packets)
+                {
+                    is->frame_drops_early++;
+                    av_frame_unref(frame);
+                    got_picture = 0;
+                }
+            }
+        }
+    }
+
+    return got_picture;
+}
+```
+
+###### `decoder_decode_frame`
+
+`decoder_decode_frame`的主干代码是一个循环，要拿到一帧解码数据，或解码出错、文件结束，才会返回。
+
+循环总共3个步骤：
+
+1.  流连续的情况下，不断调用avcodec_receive_frame获取解码后的frame
+2. 取一个packet，顺带过滤“过时”的packet
+3. 将packet送入解码器
+
+有一个`packet_pending`的概念，用于在send失败时重新发送；当收到flush_pkt时进行相应的flush事件处理，PacketQueue发生改变时第一个pkt将是flush_pkt，根据ffmpeg的API要求，需要调用`avcodec_flush_buffers`。
+
+```c
+static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)
+{
+    int ret = AVERROR(EAGAIN);
+
+    for (;;)
+    {
+        AVPacket pkt;
+        //1. 流连续的情况下，不断调用avcodec_receive_frame获取解码后的frame
+        if (d->queue->serial == d->pkt_serial)
+        {
+            do
+            {
+                if (d->queue->abort_request)
+                    return -1;
+
+                switch (d->avctx->codec_type)
+                {
+                case AVMEDIA_TYPE_VIDEO:
+                    ret = avcodec_receive_frame(d->avctx, frame);
+                    if (ret >= 0)
+                    {
+                        if (decoder_reorder_pts == -1)
+                        {
+                            frame->pts = frame->best_effort_timestamp;
+                        }
+                        else if (!decoder_reorder_pts)
+                        {
+                            frame->pts = frame->pkt_dts;
+                        }
+                    }
+                    break;
+                      if (ret == AVERROR_EOF)
+                {
+                    d->finished = d->pkt_serial;
+                    avcodec_flush_buffers(d->avctx);
+                    return 0;
+                }
+                if (ret >= 0)
+                    return 1;
+            } while (ret != AVERROR(EAGAIN));
+        }
+         //2. 取一个packet，顺带过滤“过时”的packet
+        do
+        {
+            // 队列为空
+            if (d->queue->nb_packets == 0)
+                SDL_CondSignal(d->empty_queue_cond);
+            //如果有待重发的pkt，则先取待重发的pkt，否则从队列中取一个pkt
+            if (d->packet_pending)
+            {
+                av_packet_move_ref(&pkt, &d->pkt);
+                d->packet_pending = 0;
+            }
+            else
+            {
+                //取出下一帧
+                if (packet_queue_get(d->queue, &pkt, 1, &d->pkt_serial) < 0)
+                    return -1;
+            }
+            //队列的序列不相同时
+            if (d->queue->serial == d->pkt_serial)
+                break;
+            av_packet_unref(&pkt);
+        } while (1);
+				//针对flush_pkt的处理
+        if (pkt.data == flush_pkt.data)
+        {
+            avcodec_flush_buffers(d->avctx);
+            d->finished = 0;
+            d->next_pts = d->start_pts;
+            d->next_pts_tb = d->start_pts_tb;
+        }
+        else
+        {
+                //3. 将packet送入解码器
+                if (avcodec_send_packet(d->avctx, &pkt) == AVERROR(EAGAIN))
+                {
+                    av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
+                    d->packet_pending = 1;
+                    av_packet_move_ref(&d->pkt, &pkt);
+                }
+   
+            av_packet_unref(&pkt);
+        }
+    }
+}
+```
+
+###### `queue_picture`
+
+`queue_picture`主要用于把`get_video_frame`函数取到正确解码后的一帧数据放入FrameQueue；
+
+1. `frame_queue_peek_writable`取FrameQueue的当前写节点；
+2. 把该解码后的帧数据拷贝给节点(struct Frame)保存
+3. `frame_queue_push`，“push”节点到队列中
+
+AVFrame的拷贝是通过`av_frame_move_ref`实现的，所以拷贝后`src_frame`就是无效的；
+
+```c
+
+static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double duration, int64_t pos, int serial)
+{
+    Frame *vp;
+
+#if defined(DEBUG_SYNC)
+    printf("frame_type=%c pts=%0.3f\n",
+           av_get_picture_type_char(src_frame->pict_type), pts);
+#endif
+
+    if (!(vp = frame_queue_peek_writable(&is->pictq))) //判断是否有空间可以写入，并取FrameQueue的当前写节点
+        return -1;
+
+    vp->sar = src_frame->sample_aspect_ratio;
+    vp->uploaded = 0;
+
+    vp->width = src_frame->width;
+    vp->height = src_frame->height;
+    vp->format = src_frame->format;
+
+    vp->pts = pts;
+    vp->duration = duration;
+    vp->pos = pos;
+    vp->serial = serial;
+    //修改窗口大小
+    set_default_window_size(vp->width, vp->height, vp->sar);
+
+    av_frame_move_ref(vp->frame, src_frame); //将src_frame的内存空间指向vp->frame
+    frame_queue_push(&is->pictq);            //重新推入
+    return 0;
+}
+```
+
