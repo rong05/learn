@@ -1313,7 +1313,311 @@ static int audio_decode_frame(VideoState *is)
 
 由于人耳对于声音变化的敏感度比视觉高，因此，一般采样的策略是将视频同步到音频，即对画面进行适当的丢帧或重复以追赶或等待音频。
 
+#### DTS和PTS
+
+在音视频流中的包都含有**DTS**和**PTS**，我们以此作为选择基准，到底是播放快了还是慢了，或者正以同步的速度播放。
+
+- DTS：Decoding Time Stamp 解码时间戳——告诉解码器packet解码顺序
+- PTS：Presenting Time Stamp 显示时间戳——指示从packet中解码出来的数据的显示顺序
+
+#### 计算视频Frame的显示时间
+
+要想知道ffmpeg如果计算视频一帧的显示时间，就需先了解ffmpeg的timebase；因为pts的单位就是timebase；
+
+timebase的类型是结构体AVRational（用于表示分数），如下：
+
+```c
+typedef struct AVRational{
+    int num; ///< Numerator
+    int den; ///< Denominator
+} AVRational;
+```
+
+如`timebase={1, 1000}`表示千分之一秒，那么pts=1000，即为1秒，那么这一帧就需要在第一秒的时候呈现在ffplay中，将pts转化为秒，一般做法是：`pts * av_q2d(timebase)`
+
+"时钟"的概念，ffplay定义的结构体是Clock：
+
+```c
+typedef struct Clock
+{
+    double pts;       /* clock base */// 时钟基准
+    double pts_drift; /* clock base minus time at which we updated the clock */// 更新时钟的差值
+    double last_updated;// 上一次更新的时间
+    double speed;// 速度
+    int serial;  // 时钟基于使用该序列的包 /* clock is based on a packet with this serial */
+    int paused;// 停止标志
+    int *queue_serial; // 指向当前数据包队列序列的指针，用于过时的时钟检测 /* pointer to the current packet queue serial, used for obsolete clock detection */
+} Clock;
+```
+
+时钟的工作原理：
+
+1. 通过`set_clock_at`不断对时；
+2. 获取的时间是一个估算值。估算是通过对时时记录的pts_drift估算的
+
+```javascript
+/**
+ * 更新视频的pts
+ * @param is     [description]
+ * @param pts    [description]
+ * @param pos    [description]
+ * @param serial [description]
+ */
+static void update_video_pts(VideoState *is, double pts, int64_t pos, int serial) {
+    /* update current video pts */
+    set_clock(&is->vidclk, pts, serial);
+   //将尾部的时间钟，用视频的时机钟来进行同步
+    sync_clock_to_slave(&is->extclk, &is->vidclk);
+}
+
+static void set_clock(Clock *c, double pts, int serial)
+{
+    double time = av_gettime_relative() / 1000000.0;
+    set_clock_at(c, pts, serial, time);
+}
+
+//使用当前的事来计算这几个值。也就是这一帧送显之前的操作的时间。
+static void set_clock_at(Clock *c, double pts, int serial, double time)
+{
+    c->pts = pts;
+    c->last_updated = time;
+    c->pts_drift = c->pts - time;
+    c->serial = serial;
+}
+```
+
+以一个时间轴，从左往右看。首先我们调用`set_clock_at`进行一次对时，假设这时的`pts`是落后系统时间`time`的，那么计算`pts_drift = pts - time`。
+
+接着，过了一会儿，且在下次对时前，通过`get_clock`来查询时间，因为这时的`pts`已经过时，不能直接拿pts当做这个时钟的时间。不过我们前面计算过`pts_drift`，也就是`pts`和`time`的差值，所以我们可以通过当前时刻的系统时间来估算这个时刻的pts：`pts = time + pts_drift`.
+
+当然，由于pts_drift是一直在变动的(drift与漂移、抖动的意思)，所以get_clock是估算值，真实的pts可能落在比如图示虚线圆的位置。
+
+<img src="./img/ffplay_clock.png" style="zoom:50%;" />
+
+```c
+static double get_clock(Clock *c)
+{
+    if (*c->queue_serial != c->serial)
+        return NAN;
+    if (c->paused)
+    {
+        return c->pts;
+    }
+    else
+    {
+        //pts_drift 是更新的时间钟的差值？
+        //最后的时间是 更新的差值+ 当前的时间-当前的时间和上一次更新的时间之间的差值*速度
+        //默认的情况下，根据上一次的drift计算下一次要出现的时间。
+        double time = av_gettime_relative() / 1000000.0;
+        return c->pts_drift + time - (time - c->last_updated) * (1.0 - c->speed);
+    }
+}
+```
+
+#### 以音频为主时钟同步
+
 接下来主要讲以音频为主时钟的部分，大致流程如下：
 
 <img src="./img/ffplay_video_clock.png" style="zoom:60%;" />
+
+在这个流程中，“计算上一帧显示时长”这一步骤至关重要。代码如下：
+
+```c
+/* called to display each frame */
+static void video_refresh(void *opaque, double *remaining_time)
+{
+  if (is->video_st)
+      {
+      retry:
+          if (frame_queue_nb_remaining(&is->pictq) == 0)
+          { //判断队列是否有数据
+              // nothing to do, no picture to display in the queue
+          }
+          else
+          {
+              double last_duration, duration, delay;
+              Frame *vp, *lastvp;
+              //lastvp上一帧，vp当前帧 ，nextvp下一帧
+
+              /* dequeue the picture */ //出队
+              lastvp = frame_queue_peek_last(&is->pictq);
+              vp = frame_queue_peek(&is->pictq);
+              /*
+              1、刚开始的时候（第一帧）lastvp == vp ，因为还没有调用frame_queue_next f->rindex_shown还未为1
+              2、调用frame_queue_next，将f->rindex_shown置1，还没有增加f->rindex
+              3、第二帧开始lastvp上一帧，vp 将要显示的一帧
+              */
+
+             /*如果将要显示的一帧的序列与现在解码的不同就直接抛弃*/
+              if (vp->serial != is->videoq.serial)
+              { 
+                  frame_queue_next(&is->pictq);//移动读索引
+                  goto retry;//重新获取
+              }
+
+              //如果上一帧序号不等于将要显示的一帧序号，表示将要显示的一帧是新的播放序列
+              /*
+              新的播放序列重置当前时间，这样就会走到正常显示将要显示的一帧（新序的第一帧）
+              */
+              if (lastvp->serial != vp->serial)
+                  is->frame_timer = av_gettime_relative() / 1000000.0; //获取当前时间，用于帧间对比
+
+              if (is->paused) //暂停后重新开
+                  goto display;
+
+              /* compute nominal last_duration */
+              last_duration = vp_duration(is, lastvp, vp);//计算上一帧的持续时长
+              delay = compute_target_delay(last_duration, is); //音视频同步信息，参考audio clock计算上一帧真正的持续时
+
+              time = av_gettime_relative() / 1000000.0;//取系统时刻
+              /*delay ： 是上一帧要持续显示的时长，也就是将要显示的一帧的开始显示时间
+              is->frame_timer ： 上一帧显示的时间
+              is->frame_timer + delay ： 将要显示这一帧的时间
+              如果time 还没达到显示这一帧的时间，就计算等待时间用于上一层等待，继续显示上一帧
+              如果seek后，delay = 0 ，time 就会大于is->frame_timer + delay，就往下走显示
+              */
+              if (time < is->frame_timer + delay)//如果上一帧显示时长未满，重复显示上一帧
+              { //进入视频显示，计算一个等待时间返回上一层，现在视频快了，让视频继续显示上一帧等待
+                  *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
+                  goto display;
+              }
+              /*第一帧数据时is->frame_timer = 0，会执行到time - is->frame_timer > AV_SYNC_THRESHOLD_MAX
+              如果与系统时间的偏离太大，则修正为系统时间*/
+              is->frame_timer += delay;//frame_timer更新为上一帧结束时刻，也是当前帧开始时刻
+              if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
+                  is->frame_timer = time;//如果与系统时间的偏离太大，则修正为系统时间
+
+              SDL_LockMutex(is->pictq.mutex);
+              /*更新视频时钟
+              注意：这个更新视频时钟在丢帧之前，那么如果这帧pts设置视频时钟后
+              下面又将这帧丢弃，视频时钟就是被丢弃的这一帧*/
+              if (!isnan(vp->pts))
+                  update_video_pts(is, vp->pts, vp->pos, vp->serial); //更新视频时钟检测
+              SDL_UnlockMutex(is->pictq.mutex);
+
+              /*drop帧处理
+              队列要有将要显示这一帧的下一帧
+              第一帧，队列内有2帧
+              后面就是，队列内有3帧，因为保留了上一帧（显示帧）*/
+              //丢帧逻辑
+              if (frame_queue_nb_remaining(&is->pictq) > 1)
+              {
+                  Frame *nextvp = frame_queue_peek_next(&is->pictq);//获取将要显示帧的下一帧
+                  duration = vp_duration(is, vp, nextvp);//当前帧显示时长
+                  //如果系统时间已经大于当前帧，则丢弃当前帧
+                  if (!is->step //非逐帧模式播放情况下
+                  && (framedrop > 0 //允许drop帧处理
+                  || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) //主时钟不是视频
+                  && time > is->frame_timer + duration)//当前时间已经到了nextvp的播放时间，
+                  {
+                      //此时is->frame_timer就是将要显示这一帧vp的播放时间了
+                      is->frame_drops_late++;//丢帧统计
+                      frame_queue_next(&is->pictq);//丢弃将要显示这一帧，移动读索引读到下一帧
+                      goto retry;//回到函数开始位置，继续重试(这里不能直接while丢帧，因为很可能audio clock重新对时了，这样delay值需要重新计算)
+                  }
+              }
+              /*上一帧与将要显示这一帧之间的duration用来计算将要显示这一帧的播放时间
+              将要显示这一帧与上一帧之间的duration用来计算是否丢弃将要显示这一帧*/
+            ...
+              frame_queue_next(&is->pictq); 
+              is->force_refresh = 1;//刷新画面
+
+              if (is->step && !is->paused)
+                  stream_toggle_pause(is);
+          }
+      display:
+          /* display picture */
+          if (!display_disable 
+              && is->force_refresh 
+              && is->show_mode == SHOW_MODE_VIDEO 
+              && is->pictq.rindex_shown)
+              video_display(is);//显示视频
+      }
+}
+```
+
+如果视频播放过快，则重复播放上一帧，以等待音频；如果视频播放过慢，则丢帧追赶音频。实现的方式是，参考audio clock，计算上一帧（在屏幕上的那个画面）还应显示多久（含帧本身时长），然后与系统时刻对比，是否该显示下一帧了。
+
+##### `frame_timer`
+
+`frame_timer`:可以理解为帧显示时刻，如更新前，是上一帧的显示时刻；对于更新后（`is->frame_timer += delay`），则为当前帧显示时刻。
+
+上一帧显示时刻加上delay（还应显示多久（含帧本身时长））即为上一帧应结束显示的时刻。具体原理看如下示意图：
+
+<img src="./img/ffplay_delay.png" style="zoom:50%;" />
+
+这里给出了3种情况的示意图：
+
+- time1：系统时刻小于lastvp结束显示的时刻（frame_timer+dealy），即虚线圆圈位置。此时应该继续显示lastvp
+- time2：系统时刻大于lastvp的结束显示时刻，但小于vp的结束显示时刻（vp的显示时间开始于虚线圆圈，结束于黑色圆圈）。此时既不重复显示lastvp，也不丢弃vp，即应显示vp
+- time3：系统时刻大于vp结束显示时刻（黑色圆圈位置，也是nextvp预计的开始显示时刻）。此时应该丢弃vp。
+
+##### dealy计算
+
+lastvp的显示时长delay是如何计算的，主要在`compute_target_delay`中实现，代码如下：
+
+```c
+static double compute_target_delay(double delay, VideoState *is)
+{
+    double sync_threshold, diff = 0;
+
+    /* update delay to follow master synchronisation source */
+    //只有同步时钟不是视频时钟时才计算，
+    if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)
+    { // 判断同步类型，
+        /* if video is slave, we try to correct big delays by
+           duplicating or deleting a frame */
+        /*
+        get_clock(&is->vidclk) ：返回经过从上次设置时钟到现在数据时间到了什么时间位置
+        get_master_clock(is) ： 返回主时钟到了什么时间位置（音频时钟或者外部时钟）
+        diff ： 就是当前视频播放的位置与主时钟之前的差值
+        <0 ： 视频慢了
+        >0 ：视频快了
+        */
+        diff = get_clock(&is->vidclk) - get_master_clock(is);
+
+        /* skip or repeat frame. We take into account the
+           delay to compute the threshold. I still don't know
+           if it is the best guess */
+        /*AV_SYNC_THRESHOLD_MIN 同步阀值最小范围：0.04 （秒） 1/25帧的时间
+        AV_SYNC_THRESHOLD_MAX 同步阀值最大范围：0.1 （秒） 1/10帧的时间
+        delay ： 理论上的两帧之间的时间
+        返回一个同步阀值在同步阀值范围内，使用delay设置
+        因为delay上层传来是两帧之间的时间，那只要在阀值范围内，这个时间就是sync_threshold*/
+        sync_threshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
+        if (!isnan(diff) && fabs(diff) < is->max_frame_duration)
+        {
+            //根据阀值判断是快了还是慢了
+            if (diff <= -sync_threshold)//差值已经超出阀值最小，视频慢了
+                delay = FFMAX(0, delay + diff);/*上一帧需要加快，delay + -diff，这样算出来的delay基本都是0，上一帧还要显示delay时间*/
+            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD)
+                delay = delay + diff;/*视频快了，上一帧就要减慢，delay+diff，AV_SYNC_FRAMEDUP_THRESHOLD 0.1秒，如果帧持续时间超过这个值，它将不会被成倍来补偿进行同步*/
+            else if (diff >= sync_threshold)
+                delay = 2 * delay;/*视频快了，delay 相当上一帧显示两次，因为diff == sync_threshold也是快了一帧*/
+        }
+    }
+
+    av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",
+           delay, -diff);
+
+    return delay;
+}
+```
+
+##### `sync_threshold`理解：
+
+<img src="./img/ffplay_sync_threshold.png" style="zoom:50%;" />
+
+从图上可以看出来sync_threshold是建立一块区域，在这块区域内无需调整lastvp的显示时长，直接返回delay即可。也就是在这块区域内认为是准同步的。
+
+如果小于-sync_threshold，那就是视频播放较慢，需要适当丢帧。具体是返回一个最大为0的值。根据前面frame_timer的图，至少应更新画面为vp。
+
+如果大于sync_threshold，那么视频播放太快，需要适当重复显示lastvp。具体是返回2倍的delay，也就是2倍的lastvp显示时长，也就是让lastvp再显示一帧。
+
+##### 总结
+
+- 基本策略是：如果视频播放过快，则重复播放上一帧，以等待音频；如果视频播放过慢，则丢帧追赶音频。
+- 这一策略的实现方式是：引入frame_timer概念，标记帧的显示时刻和应结束显示的时刻，再与系统时刻对比，决定重复还是丢帧。
+- lastvp的应结束显示的时刻，除了考虑这一帧本身的显示时长，还应考虑了video clock与audio clock的差值。
+- 并不是每时每刻都在同步，而是有一个“准同步”的差值区域。
 
