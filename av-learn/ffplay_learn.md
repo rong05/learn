@@ -1621,3 +1621,200 @@ static double compute_target_delay(double delay, VideoState *is)
 - lastvp的应结束显示的时刻，除了考虑这一帧本身的显示时长，还应考虑了video clock与audio clock的差值。
 - 并不是每时每刻都在同步，而是有一个“准同步”的差值区域。
 
+### `FrameQueue`的分析
+
+ffplay 是通过`FrameQueue`来保存解码后的数据；
+
+#### `Frame`结构体
+
+`Frame`是用来存储解码后的一帧数据，其中包括视频、音频和字幕；
+
+```c
+typedef struct Frame
+{
+    AVFrame *frame;//音视频解码数据
+    AVSubtitle sub;//字幕解码数据
+    int serial;
+    double pts;      /* presentation timestamp for the frame */
+    double duration; /* estimated duration of the frame */
+    int64_t pos;     /* byte position of the frame in the input file */
+    int width;
+    int height;
+    int format;
+    AVRational sar;
+    int uploaded;
+    int flip_v;
+} Frame;
+```
+
+#### `FrameQueue`结构体
+
+`FrameQueue`是用来表示整个帧队列；
+
+```c
+typedef struct FrameQueue
+{
+    Frame queue[FRAME_QUEUE_SIZE];//队列元素，用数组模拟队列
+    int rindex;//读指针
+    int windex;//写指针
+    int size;//当前存储的节点个数
+    int max_size;//最大允许存储的节点个数
+    int keep_last;//是否要保留最后一个读节点
+    int rindex_shown;//当前节点是否已经显示
+    SDL_mutex *mutex;
+    SDL_cond *cond;
+    PacketQueue *pktq;//关联的PacketQueue
+} FrameQueue;
+```
+
+`FrameQueue`的设计思想是通过数组实现队列（环形缓冲区）；
+
+设计理念：
+
+- 高效率的读写模型
+- 高效的内存模型
+- 环形缓冲区设计，同时可以访问上一读节点
+
+#### `FrameQueue`实现函数分析
+
+##### 初始化函数
+
+`FrameQueue`的初始化函数是`frame_queue_init`;
+
+```c
+static int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last)
+{
+    int i;
+    memset(f, 0, sizeof(FrameQueue));
+    if (!(f->mutex = SDL_CreateMutex()))
+    {
+        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
+        return AVERROR(ENOMEM);
+    }
+    if (!(f->cond = SDL_CreateCond()))
+    {
+        av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
+        return AVERROR(ENOMEM);
+    }
+    f->pktq = pktq;
+    f->max_size = FFMIN(max_size, FRAME_QUEUE_SIZE);
+    f->keep_last = !!keep_last;
+    for (i = 0; i < f->max_size; i++)
+        if (!(f->queue[i].frame = av_frame_alloc()))
+            return AVERROR(ENOMEM);
+    return 0;
+}
+```
+
+其中主要是内存初始化和锁初始化，关键参数是`max_size`和`keep_last`;`max_size`是最大允许存储的节点个数,最大不能超过
+
+`FRAME_QUEUE_SIZE`，`FRAME_QUEUE_SIZE`定义如下：
+
+```c
+#define VIDEO_PICTURE_QUEUE_SIZE 3 //视频显示缓存最大帧数
+#define SUBPICTURE_QUEUE_SIZE 16   //字幕缓存最大帧数
+#define SAMPLE_QUEUE_SIZE 9        //默认最大帧数
+#define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
+```
+
+如此看来最大不能超过16；
+
+`keep_last`是一个bool值，表示是否在环形缓冲区的读写过程中保留最后一个读节点不被覆写。`f->keep_last = !!keep_last;`里的双感叹号是C中的一种技巧，旨在让int参数规整为0/1的“bool值”。
+
+数组queue中的每个元素的frame(AVFrame*)的字段调用`av_frame_alloc`分配内存。
+
+##### 反初始化函数
+
+```c
+static void frame_queue_destory(FrameQueue *f)
+{
+    int i;
+    for (i = 0; i < f->max_size; i++)
+    {
+        Frame *vp = &f->queue[i];
+        frame_queue_unref_item(vp);
+        av_frame_free(&vp->frame);
+    }
+    SDL_DestroyMutex(f->mutex);
+    SDL_DestroyCond(f->cond);
+}
+```
+
+queue元素的释放分两步；
+
+1. `frame_queue_unref_item`,释放的内存都是**关联**的内存，而非结构体自身内存;
+2. `av_frame_free`,`av_frame_free`与初始化中的`av_frame_alloc`对应，用于释放AVFrame.
+
+`frame_queue_unref_item`定义如下：
+
+```c
+static void frame_queue_unref_item(Frame *vp)
+{
+    av_frame_unref(vp->frame);//frame计数减1
+    avsubtitle_free(&vp->sub);//sub关联的内存释放
+}
+```
+
+AVFrame内部有许多的AVBufferRef类型字段，而AVBufferRef只是AVBuffer的引用，AVBuffer通过引用计数自动管理内存（简易垃圾回收机制）。因此AVFrame在不需要的时候，需要通过`av_frame_unref`减少引用计数。(这个还在学习阶段)
+
+##### FrameQueue的‘写’操作
+
+FrameQueue的‘写’操作分为两个步骤；
+
+1. `frame_queue_peek_writable`获取一个可写节点；
+2. `frame_queue_push`告知FrameQueue“存入”该节点。
+
+FrameQueue始终是一个线程写，另一个线程读。读写没有其他线程产生竞争，唯一需要的是读与写线程间的同步。FrameQueue的整个优化和设计思路正是基于这一点的。这个设计思想类似于Linux内核中的kfifo。
+
+`frame_queue_peek_writable`定义如下：
+
+```c
+static Frame *frame_queue_peek_writable(FrameQueue *f)
+{
+    /* wait until we have space to put a new frame */
+    SDL_LockMutex(f->mutex);
+    while (f->size >= f->max_size &&
+           !f->pktq->abort_request)
+    {
+        SDL_CondWait(f->cond, f->mutex);
+    }
+    SDL_UnlockMutex(f->mutex);
+
+    if (f->pktq->abort_request)
+        return NULL;
+
+    return &f->queue[f->windex];
+}
+```
+
+函数分3步：
+
+1. 加锁情况下，等待直到队列有空余空间可写（`f->size < f->max_size`）
+2. 如果有退出请求（`f->pktq->abort_request`），则返回NULL
+3. 返回`windex`位置的元素（`windex`指向当前应写位置）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 参考链接：
+
+https://www.zhihu.com/column/avtec
+
+https://cloud.tencent.com/developer/article/1373966
