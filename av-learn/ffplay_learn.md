@@ -1793,21 +1793,168 @@ static Frame *frame_queue_peek_writable(FrameQueue *f)
 2. 如果有退出请求（`f->pktq->abort_request`），则返回NULL
 3. 返回`windex`位置的元素（`windex`指向当前应写位置）
 
+因为queue数组被当做一个环形缓冲区使用，那么的确存在underrun和overrun的情况，即读过快，或写过快的情况，这时如果不加控制，就会呈现缓冲区覆盖。
 
+FrameQueue的精明之处在于，先通过size判断当前缓冲区内空间是否够写，或者够读，比如这里先通过一个循环的条件等待，判断`f->size >= f->max_size`，如果`f->size >= f->max_size`，那么说明队列中的节点已经写满，也就是已经overrun了，此时如果再写，肯定会覆写未读数据，那么就需要继续等待。当无需等待时，windex指向的内存一定是已经读过的（除非代码异常了）。
 
+调用`frame_queue_peek_writable`取到Frame指针后，就可以对Frame内的字段自由改写，因为只有一个写进程，且无需担心读进程覆写（如上分析，读进程要读一个节点时，也会先判断underrun的情况）。
 
+实现步骤：
 
+```c
+Frame* vp = frame_queue_peek_writable(q);
+//将要存储的数据写入frame字段，比如：
+av_frame_move_ref(vp->frame, src_frame);
+//存入队列
+frame_queue_push(q);
+```
 
+`frame_queue_push`代码如下：
 
+```c
+static void frame_queue_push(FrameQueue *f)
+{
+    if (++f->windex == f->max_size)
+        f->windex = 0;
+    SDL_LockMutex(f->mutex);
+    f->size++;
+    SDL_CondSignal(f->cond);
+    SDL_UnlockMutex(f->mutex);
+}
+```
 
+执行两个步骤：
 
+1. windex加1，如果超过max_size，则回环为0
+2. 加锁情况下大小加1.
 
+frame_queue的写过程总结示意图如下：
 
+<img src="./img/ffplay_framequeue.png" style="zoom:50%;" />
 
+##### FrameQueue的'读'操作
 
+FrameQueue的‘读’操作分为两个步骤；
 
+1. `frame_queue_peek_readable`获取一个可读节点
+2. `frame_queue_next`告知FrameQueue“取出”该节点。
 
+`frame_queue_peek_readable`代码如下：
 
+```c
+static Frame *frame_queue_peek_readable(FrameQueue *f)
+{
+    /* wait until we have a readable a new frame */
+    SDL_LockMutex(f->mutex);
+    //加锁情况下，判断是否有可读节点
+    while (f->size - f->rindex_shown <= 0 &&
+           !f->pktq->abort_request)
+    {
+        SDL_CondWait(f->cond, f->mutex);
+    }
+    SDL_UnlockMutex(f->mutex);
+    //如果有退出请求，则返回NULL
+    if (f->pktq->abort_request)
+        return NULL;
+    //读取当前可读节点
+    return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
+}
+```
+
+`frame_queue_next`代码如下：
+
+```c
+static void frame_queue_next(FrameQueue *f)
+{
+    //如果支持keep_last，且rindex_shown为0，则rindex_shown赋1，返回
+    if (f->keep_last && !f->rindex_shown)
+    {
+        f->rindex_shown = 1;
+        return;
+    }
+    //否则，移动rindex指针，并减小size
+    frame_queue_unref_item(&f->queue[f->rindex]);
+    if (++f->rindex == f->max_size)
+        f->rindex = 0;
+    SDL_LockMutex(f->mutex);
+    f->size--;
+    SDL_CondSignal(f->cond);
+    SDL_UnlockMutex(f->mutex);
+}
+```
+
+`frame_queue_next`用于在读完一个节点后调用，用于标记一个节点已经被读过。
+
+读过程可以描述为：
+
+```c
+Frame* vp = frame_queue_peek_readable(f);
+//读取vp的数据，比如
+printf("pict_type=%d\n", vp->frame->pict_type);
+frame_queue_next(f);
+```
+
+标记一个节点为已读，执行两个步骤：
+
+1. rindex加1，如果超过max_size，则回环为0
+2. 加锁情况下大小减1.
+
+***对于以及读过的节点，需要调用`frame_queue_unref_item`释放关联内存。***
+
+执行rindex操作前，需要先判断`rindex_shown`的值，如果为0，则赋1。如下图：
+
+<img src="./img/ffplay_framequeue_read.png" style="zoom:50%;" />
+
+这里模拟了从初始化开始的2次“读”。
+
+还没开始读，rindex和rindex_shown均为0。这时要peek的读节点是节点0(图中黑色块）。
+
+第一次读，调用next，满足条件`f->keep_last && !f->rindex_shown`，所以rindex仍然是0，而rindex_shown为1.此时节点0（灰色块）是已读节点，也是要keep的last节点，将要读的节点是节点1（黑色块）。（恰好是rindex+rindex_shown）
+
+第二次读，peek了黑色块后，调用next，不满足条件`f->keep_last && !f->rindex_shown`，所以rindex为1，而rindex_shown为2.此时节点1（灰色块）是last节点，节点2（黑色块）是将要读的节点。（也恰好是rindex+rindex_shown）
+
+继续往后分析，会一直重复第二次读的情况，始终是rindex指向了last，而rindex_shown一直为1，rindex+rindex_shown刚好是将要读的节点。
+
+FrameQueue的读过程也分析完了。
+
+##### 辅助函数
+
+```c
+//（上文中的用词是“将要读的节点”，也就是黑色块），与frame_queue_peek_readable等效，但没有检查是否有可读节点
+//读当前节点
+static Frame *frame_queue_peek(FrameQueue *f)
+{
+    return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
+}
+//读下一个节点
+static Frame *frame_queue_peek_next(FrameQueue *f)
+{
+    return &f->queue[(f->rindex + f->rindex_shown + 1) % f->max_size];
+}
+//读上一个节点
+static Frame *frame_queue_peek_last(FrameQueue *f)
+{
+    return &f->queue[f->rindex];
+}
+/* return the number of undisplayed frames in the queue */
+static int frame_queue_nb_remaining(FrameQueue *f)
+{
+    return f->size - f->rindex_shown;
+}
+/* return last shown position */
+static int64_t frame_queue_last_pos(FrameQueue *f)
+{
+    Frame *fp = &f->queue[f->rindex];
+    if (f->rindex_shown && fp->serial == f->pktq->serial)
+        return fp->pos;
+    else
+        return -1;
+}
+```
+
+看下节点位置：
+
+<img src="./img/ffplay_framequeue_index.png" style="zoom:50%;" />
 
 
 
