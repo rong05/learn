@@ -210,3 +210,10 @@ mediaCodec.setParameters(param);
 - VBR 输出码率会在一定范围内波动，对于小幅晃动，方块效应会有所改善，但对剧烈晃动仍无能为力；连续调低码率则会导致码率急剧下降，如果无法接受这个问题，那 VBR 就不是好的选择。
 - CBR 的优点是稳定可控，这样对实时性的保证有帮助。所以 WebRTC 开发中一般使用的是CBR。
 
+## 参考链接：
+
+https://www.jianshu.com/p/d9bd92fca0c6
+
+https://www.jianshu.com/p/06dfc5cf95a2
+
+https://developer.android.google.cn/reference/android/media/MediaCodec
