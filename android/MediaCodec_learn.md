@@ -56,7 +56,7 @@ MediaCodec的生命周期有三种状态：Stopped、Executing、Released。
 - Stopped，包含三种子状态：Uninitialized、Configured、Error。
 - Executing，包含三种子状态：Flushed、Running、End-of-Stream。
 
-<img src="/Users/wangxueke/learn/android/img/mediacodec_state.png" style="zoom:50%;" />
+<img src="./img/mediacodec_state.png" style="zoom:50%;" />
 
 **Stopped**的三种子状态：
 
@@ -176,4 +176,37 @@ MediaCodec codec = MediaCodec.createByCodecName(name);//创建编解码器
 - `release`：释放编解码器实例使用的资源。
 
 ## MediaCodec 流控
+
+一般编码器都可以设置一个目标码率，但编码器的实际输出码率不会完全符合设置，因为在编码过程中实际可以控制的并不是最终输出的码率，而是编码过程中的一个量化参数（Quantization Parameter，QP），它和码率并没有固定的关系，而是取决于图像内容。
+
+MediaCodec 流控相关的接口并不多，一是配置时设置目标码率和码率控制模式，二是动态调整目标码率(Android 19 版本以上)。
+
+配置时指定目标码率和码率控制模式：
+
+```java
+mediaFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
+mediaFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+mVideoCodec.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+```
+
+码率控制模式有三种：
+
+- CQ  表示完全不控制码率，尽最大可能保证图像质量；
+- CBR 表示编码器会尽量把输出码率控制为设定值，即我们前面提到的“不为所动”；
+- VBR 表示编码器会根据图像内容的复杂度（实际上是帧间变化量的大小）来动态调整输出码率，图像复杂则码率高，图像简单则码率低；
+
+动态调整目标码率：
+
+```java
+Bundle param = new Bundle();
+param.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate);
+mediaCodec.setParameters(param);
+```
+
+ Android 流控策略选择:
+
+- 质量要求高、不在乎带宽、解码器支持码率剧烈波动的情况下，可以选择 CQ 码率控制策略。
+- VBR 输出码率会在一定范围内波动，对于小幅晃动，方块效应会有所改善，但对剧烈晃动仍无能为力；连续调低码率则会导致码率急剧下降，如果无法接受这个问题，那 VBR 就不是好的选择。
+- CBR 的优点是稳定可控，这样对实时性的保证有帮助。所以 WebRTC 开发中一般使用的是CBR。
 
