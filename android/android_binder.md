@@ -142,7 +142,7 @@ static int open_driver(const char *driver)
 
 #### 启动binder线程池
 
-`ProcessState` 实例后调用其 `startThreadPool()` 函数，以启动进程的 Binder 线程池。
+`ProcessState` 实例后调用其 `startThreadPool` 函数，以启动进程的 Binder 线程池。
 
 ```c
 void ProcessState::startThreadPool()
@@ -516,6 +516,8 @@ Android 10在此之后，`BpServiceManager` 不再通过手动实现，而是采
 <img src="./img/BpServiceManager.png" style="zoom:40%;" />
 
 ## Binder 数据传输流程
+
+### Binder 数据发送过程
 
 从`addService`函数来分析Binder的数据传输流程；从获取servicemanage的章节我们得知，servicemanage的Client端是`BpServiceManager`，那我们直接来看`BpServiceManager`中的`addService`函数，如下：
 
@@ -909,4 +911,138 @@ struct binder_write_read {
 1. `flat_binder_object`封装`service`的结构体，其中重要的参数是binder、handle、cookie
 2. `binder_transaction_data`组装`Parcel`数据的结构体;
 3. `binder_write_read` 是binder 驱动与用户态共用的、存储读写操作的结构体
+
+### Binder 数据接收过程
+
+Binder 线程用于在 Server 中接收处理从 Binder 驱动发送来的数据。`startThreadPool`提及的函数 `IPCThreadState.joinThreadPool` 将自己注册到 Binder 线程池，等待接收数据。
+
+在`joinThreadPool` 函数中，循环执行`getAndExecuteCommand`,调用 `talkWithDriver` 从 `mIn` 窗口解析出需要执行的命令后，执行 `executeCommand`。在`executeCommand`的`BR_TRANSACTION`分支，其中 `the_context_object` 为 `BBinder` 对象，也就是 Server 的 Binder 本体。`BBinder.transact` 会再调用 `BBinder.onTransact` 函数，实现 Server 进程 Binder 的调用。
+
+而在`ServiceManager`采用了`LooperCallback`方式监听binder数据，最终也是循环执行`getAndExecuteCommand`；这部分的分析会在创建`ServiceManager`进程详细分析；
+
+接收数据时也在`talkWithDriver`中ioctl读写获取一个`binder_write_read`结构体，在`executeCommand`的`BR_TRANSACTION`分支中在把数据进一步解析`binder_transaction_data`结构体并将相应的输入数据转换`buffer`，`buffer`是`Parcel`对象，在 `BBinder` 的`onTransact`函数会在`BnServiceManager`重载`onTransact`函数；
+
+```c
+status_t BnServiceManager::onTransact(
+    uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)
+{
+    //printf("ServiceManager received: "); data.print();
+    switch(code) {
+        case GET_SERVICE_TRANSACTION: {
+            CHECK_INTERFACE(IServiceManager, data, reply);
+            String16 which = data.readString16();
+            sp<IBinder> b = const_cast<BnServiceManager*>(this)->getService(which);
+            reply->writeStrongBinder(b);
+            return NO_ERROR;
+        } break;
+        case CHECK_SERVICE_TRANSACTION: {
+            CHECK_INTERFACE(IServiceManager, data, reply);
+            String16 which = data.readString16();
+            sp<IBinder> b = const_cast<BnServiceManager*>(this)->checkService(which);
+            reply->writeStrongBinder(b);
+            return NO_ERROR;
+        } break;
+        case ADD_SERVICE_TRANSACTION: {
+            CHECK_INTERFACE(IServiceManager, data, reply);
+            String16 which = data.readString16();
+            sp<IBinder> b = data.readStrongBinder();
+            status_t err = addService(which, b);
+            reply->writeInt32(err);
+            return NO_ERROR;
+        } break;
+        case LIST_SERVICES_TRANSACTION: {
+            CHECK_INTERFACE(IServiceManager, data, reply);
+            Vector<String16> list = listServices();
+            const size_t N = list.size();
+            reply->writeInt32(N);
+            for (size_t i=0; i<N; i++) {
+                reply->writeString16(list[i]);
+            }
+            return NO_ERROR;
+        } break;
+        default:
+            return BBinder::onTransact(code, data, reply, flags);
+    }
+}
+```
+
+在`ADD_SERVICE_TRANSACTION`分支，会通过`Parcel`的`readStrongBinder`函数将数据读取`flat_binder_object`结构体，再获取IBinder弱引用指针地址；其中主要执行的函数是`unflattenBinder`;
+
+```c
+status_t Parcel::unflattenBinder(sp<IBinder>* out) const
+{
+    const flat_binder_object* flat = readObject(false);
+
+    if (flat) {
+        switch (flat->hdr.type) {
+            case BINDER_TYPE_BINDER: {
+                sp<IBinder> binder = reinterpret_cast<IBinder*>(flat->cookie);
+                return finishUnflattenBinder(binder, out);
+            }
+            case BINDER_TYPE_HANDLE: {
+                sp<IBinder> binder =
+                    ProcessState::self()->getStrongProxyForHandle(flat->handle);
+                return finishUnflattenBinder(binder, out);
+            }
+        }
+    }
+    return BAD_TYPE;
+}
+```
+
+最后会调用`ServiceManager`的`addService`函数；
+
+```c
+Status ServiceManager::addService(const std::string& name, const sp<IBinder>& binder, bool allowIsolated, int32_t dumpPriority) {
+    auto ctx = mAccess->getCallingContext();
+
+    // apps cannot add services
+    if (multiuser_get_app_id(ctx.uid) >= AID_APP) {
+        return Status::fromExceptionCode(Status::EX_SECURITY);
+    }
+
+    if (!mAccess->canAdd(ctx, name)) {
+        return Status::fromExceptionCode(Status::EX_SECURITY);
+    }
+
+    if (binder == nullptr) {
+        return Status::fromExceptionCode(Status::EX_ILLEGAL_ARGUMENT);
+    }
+
+    if (!isValidServiceName(name)) {
+        LOG(ERROR) << "Invalid service name: " << name;
+        return Status::fromExceptionCode(Status::EX_ILLEGAL_ARGUMENT);
+    }
+
+    // implicitly unlinked when the binder is removed
+    if (binder->remoteBinder() != nullptr && binder->linkToDeath(this) != OK) {
+        LOG(ERROR) << "Could not linkToDeath when adding " << name;
+        return Status::fromExceptionCode(Status::EX_ILLEGAL_STATE);
+    }
+
+    auto entry = mNameToService.emplace(name, Service {
+        .binder = binder,
+        .allowIsolated = allowIsolated,
+        .dumpPriority = dumpPriority,
+        .debugPid = ctx.debugPid,
+    });
+
+    auto it = mNameToRegistrationCallback.find(name);
+    if (it != mNameToRegistrationCallback.end()) {
+        for (const sp<IServiceCallback>& cb : it->second) {
+            entry.first->second.guaranteeClient = true;
+            // permission checked in registerForNotifications
+            cb->onRegistration(name, binder);
+        }
+    }
+
+    return Status::ok();
+}
+```
+
+`addService`函数中主要执行的是将Ibinder对象封装成`Service`结构体，并于`name`为key插入`mNameToService`中，而mNameToService是一个`std::map<std::string, Service>`；这样`addService`在除了内核部分的代码算是基本完成;binder驱动中的数据传递会在binder驱动分析中进行解析；
+
+数据传递过程如下：
+
+![binder数据传递](img/binder_write_read.png)
 
