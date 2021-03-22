@@ -716,7 +716,7 @@ status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
 
 <img src="./img/binder_transaction_data.png" style="zoom:30%;" />
 
-[图片来源]: http://palanceli.com/2016/05/08/2016/0514BinderLearning3/
+​															[图片来源](http://palanceli.com/2016/05/08/2016/0514BinderLearning3/ )
 
 `binder_transaction_data`结构体定义如下：
 
