@@ -1040,9 +1040,53 @@ Status ServiceManager::addService(const std::string& name, const sp<IBinder>& bi
 }
 ```
 
-`addService`函数中主要执行的是将Ibinder对象封装成`Service`结构体，并于`name`为key插入`mNameToService`中，而mNameToService是一个`std::map<std::string, Service>`；这样`addService`在除了内核部分的代码算是基本完成;binder驱动中的数据传递会在binder驱动分析中进行解析；
+`addService`函数中主要执行的是将Ibinder对象封装成`Service`结构体，并于`name`为key插入`mNameToService`中，而`mNameToService`是一个`std::map<std::string, Service>`；这样`addService`在除了内核部分的代码算是基本完成;binder驱动中的数据传递会在binder驱动分析中进行解析；
 
 数据传递过程如下：
 
 ![binder数据传递](img/binder_write_read.png)
+
+## `ServiceManager`进程创建
+
+启动的`main`函数在`frameworks/native/cmds/servicemanager/main.cpp`中，其中关键步骤和media进行类型；
+
+1. 创建`ProcessState`,`ServiceManager`进程没有调用`self`，而是通过`initWithDriver` 创建，其实关键代码还是一样的，实现了单例模式，通过`initWithDriver` 获取实例；并通过`setThreadPoolMaxThreadCount`设置最大线程数为0；
+2. 创建`ServiceManager`实例，同样使用`addService`函数同样把`ServiceManager`插入`mNameToService`中；并创建`IPCThreadState`实通过`setTheContextObject`设置the_context_object为`ServiceManager` ;
+3. 通过`ProcessState`的`becomeContextManager`函数设置`ServiceManager`进程为binder驱动的上下文管理者；
+4. 通过`Looper::prepare`创建`Looper`,`Looper`也是和`IPCThreadState`一样线程单例，这里可以理解成是java中`handle`事件中的`looper`,后续会再对native层的`Looper`进行详细分析；并`BinderCallback`的`setupTo`注册`Looper`的事件监听和`ClientCallbackCallback`的`setupTo`注册`Looper`的事件；
+5. 进入死循环，调用 `looper->pollAll`函数，实则是在`epoll_wait`等待消息;
+
+```c
+int main(int argc, char** argv) {
+    if (argc > 2) {
+        LOG(FATAL) << "usage: " << argv[0] << " [binder driver]";
+    }
+
+    const char* driver = argc == 2 ? argv[1] : "/dev/binder";
+
+    sp<ProcessState> ps = ProcessState::initWithDriver(driver);
+    ps->setThreadPoolMaxThreadCount(0);
+    ps->setCallRestriction(ProcessState::CallRestriction::FATAL_IF_NOT_ONEWAY);
+
+    sp<ServiceManager> manager = new ServiceManager(std::make_unique<Access>());
+    if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
+        LOG(ERROR) << "Could not self register servicemanager";
+    }
+
+    IPCThreadState::self()->setTheContextObject(manager);
+    ps->becomeContextManager(nullptr, nullptr);
+
+    sp<Looper> looper = Looper::prepare(false /*allowNonCallbacks*/);
+
+    BinderCallback::setupTo(looper);
+    ClientCallbackCallback::setupTo(looper, manager);
+
+    while(true) {
+        looper->pollAll(-1);
+    }
+
+    // should not be reached
+    return EXIT_FAILURE;
+}
+```
 

@@ -22,7 +22,7 @@
 
 **红黑树的图例：**
 
-![Red-black_tree_example.svg](./img/Red-black_tree_example.svg.png )
+![Red-black_tree_example.svg](img/Red-black_tree_example.svg.png )
 
 
 
@@ -30,7 +30,7 @@
 
 ## 操作
 
-​			在红黑树上进行插入操作和删除操作会导致不再符合红黑树的性质，因此需对红黑树进行性质的恢复，但必须做到少量![o(logn)](/Users/wangxueke/learn/data-structure_learn/img/o(logn).svg)的颜色变更,而且不超过三次树旋转（对于插入操作是两次）；由此可以看出红黑树的插入和删除复杂，但是操作时间仍然可以保持O(logn)
+​			在红黑树上进行插入操作和删除操作会导致不再符合红黑树的性质，因此需对红黑树进行性质的恢复，但必须做到少量O(logn)的颜色变更,而且不超过三次树旋转（对于插入操作是两次）；由此可以看出红黑树的插入和删除复杂，但是操作时间仍然可以保持O(logn)
 
 ### 树旋转
 
@@ -40,7 +40,7 @@
 
 ​		右孩子旋转到父节点的位置为**左旋**；				
 
-​		![Tree_rotation](./img/Tree_rotation.svg)
+​		![Tree_rotation](img/Tree_rotation.svg)
 
 红黑树的左旋代码如下：
 
@@ -106,7 +106,7 @@ static void __rb_rotate_right(struct rb_node *node, struct rb_root *root)
 
 流程图如下：
 
-![rb_tree_install](./img/rb_tree_install.png)
+![rb_tree_install](img/rb_tree_install.png)
 
 完成以上流程只是找到具体的插入位置，但在插入之后需重新调整平衡来保持红黑树的基本属性，进行重新调整平衡实现代码如下：
 
@@ -192,7 +192,7 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root)//已经查找�
 
 ​		存在在叔叔节点，父亲节点和叔叔节点都为红色，将父亲节点和叔叔节点都置为黑色，再将祖父节点置为红色 ，这样就保持了性质5；紅色的祖父节点可能是根节点，这就违反了性质2，也有可能祖父节点的父节点是紅色的，这就违反了性质4；这种情形下需将祖父节点当成是新加入的节点进行各种情形的檢查。
 
-![](./img/Red-black_tree_insert_case_3.png)
+![](img/Red-black_tree_insert_case_3.png)
 
 **注意：***<u>在余下的情形下，假设父亲节点是在祖父节点左侧，如果父亲节点是在祖父节点右侧，情形4和情形5中的左和右应当对调。</u>*
 
@@ -200,7 +200,7 @@ void rb_insert_color(struct rb_node *node, struct rb_root *root)//已经查找�
 
 ​		当父亲节点为红色，叔叔节点缺失或为黑色，新节点为其父亲节点的右侧时，其父亲节点在祖父节点左侧；针对父亲节点进行一次左旋转，并将新节点位置和其父亲节点位置进行交换；完成这种情形后，还需解决仍然失效的性质4，那就进行情形5处理；
 
-![](./img/Red-black_tree_insert_case_4.png)
+![](img/Red-black_tree_insert_case_4.png)
 
 #### 情形五
 
@@ -384,25 +384,25 @@ static void __rb_erase_color(struct rb_node *node, struct rb_node *parent,
 
 当node的兄弟节点为红色时，并且针对父节点进行左旋转一次，把红色兄弟转换成node的祖父，我们接着对调node的父亲和祖父的颜色。尽管所有路径上黑色节点的数目没有改变，但现在N有了一个黑色的兄弟和一个红色的父亲，所以我们可以接下去按**情形4**、**情形5**或**情形6**来处理。
 
-![](./img/Red-black_tree_delete_case_2.png)
+![](img/Red-black_tree_delete_case_2.png)
 
 #### 情形三
 
 在父节点和兄弟节点、兄弟节点的孩子节点都是黑色的情况下，将兄弟节点置成红色，。结果是通过兄弟节点的所有路径，它们就是以前不通过node的那些路径，都少了一个黑色节点。因为删除N的初始的父亲使通过N的所有路径少了一个黑色节点，这使事情都平衡了起来。但是，通过父节点的所有路径现在比不通过父节点的路径少了一个黑色节点，所以仍然违反性质5。所以需针对node的父亲节点重新调整平衡；
 
-![](./img/Red-black_tree_delete_case_3.png)
+![](img/Red-black_tree_delete_case_3.png)
 
 #### 情形四
 
 兄弟节点是黑色，兄弟节点的左儿子是红色，兄弟节点的右儿子是黑色，而node是它父亲的左儿子。在这种情形下我们在兄弟节点上做右旋转，这样兄弟节点的左儿子成为兄弟节点的父亲和node的新兄弟。我们接着交换兄弟节点和它的新父亲的颜色。所有路径仍有同样数目的黑色节点，但是现在node有了一个黑色兄弟，他的右儿子是红色的，所以我们进入了**情形6**。node和它的父亲都不受这个变换的影响。
 
-![](./img/Red-black_tree_delete_case_5.png)
+![](img/Red-black_tree_delete_case_5.png)
 
 #### 情形五
 
  兄弟节点和兄弟节点的儿子都是黑色，但是node的父亲是红色。在这种情形下，我们简单的交换N的兄弟和父亲的颜色。这不影响不通过N的路径的黑色节点的数目，但是它在通过N的路径上对黑色节点数目增加了一，添补了在这些路径上删除的黑色节点。
 
-![](./img/Red-black_tree_delete_case_4.png)
+![](img/Red-black_tree_delete_case_4.png)
 
 
 
@@ -417,7 +417,7 @@ static void __rb_erase_color(struct rb_node *node, struct rb_node *parent,
 
 在任何情况下，在这些路径上的黑色节点数目都没有改变。所以我们恢复了性质4。在示意图中的白色节点可以是红色或黑色，但是在变换前后都必须指定相同的颜色。
 
-![](./img/Red-black_tree_delete_case_6.png)
+![](img/Red-black_tree_delete_case_6.png)
 
 ### 	外部链接
 
