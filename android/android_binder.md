@@ -356,7 +356,7 @@ status_t IPCThreadState::getAndExecuteCommand()
 
 大概流程图如下：
 
-<img src="./img/defaultServiceManager.png" style="zoom:50%;" />
+<img src="img/defaultServiceManager.png" style="zoom:50%;" />
 
 `defaultServiceManager`函数代码如下：
 
@@ -513,7 +513,7 @@ Android 10在此之后，`BpServiceManager` 不再通过手动实现，而是采
 
 `BpServiceManager`的继承关系图如下：
 
-<img src="./img/BpServiceManager.png" style="zoom:40%;" />
+<img src="img/BpServiceManager.png" style="zoom:40%;" />
 
 ## Binder 数据传输流程
 
@@ -716,7 +716,7 @@ status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
 
 `binder_transaction_data`结构体在中组装的`Parcel`数据：
 
-<img src="./img/binder_transaction_data.png" style="zoom:30%;" />
+<img src="img/binder_transaction_data.png" style="zoom:30%;" />
 
 ​															[图片来源](http://palanceli.com/2016/05/08/2016/0514BinderLearning3/ )
 
@@ -1063,25 +1063,31 @@ int main(int argc, char** argv) {
     }
 
     const char* driver = argc == 2 ? argv[1] : "/dev/binder";
-
+  	//创建ProcessState，并打开binder驱动
     sp<ProcessState> ps = ProcessState::initWithDriver(driver);
+  	//设置最大线程数为了0
     ps->setThreadPoolMaxThreadCount(0);
     ps->setCallRestriction(ProcessState::CallRestriction::FATAL_IF_NOT_ONEWAY);
-
+  
+  //创建ServiceManager实例
     sp<ServiceManager> manager = new ServiceManager(std::make_unique<Access>());
     if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
         LOG(ERROR) << "Could not self register servicemanager";
     }
-
+  	//创建IPCThreadState实例和设置IPCThreadState的上下文管理者
     IPCThreadState::self()->setTheContextObject(manager);
+  	//设置ServiceManager进程为binder的上下文管理者
     ps->becomeContextManager(nullptr, nullptr);
-
+  
+  	//创建looper
     sp<Looper> looper = Looper::prepare(false /*allowNonCallbacks*/);
-
+		//创建looper事件监听回调
     BinderCallback::setupTo(looper);
+  	//把ClientCallbackCallback作为回调，注册进入Lopper，其中创建了一个定时器对象，5秒跑一次
     ClientCallbackCallback::setupTo(looper, manager);
 
     while(true) {
+      	//循环等待驱动是否有事件返回
         looper->pollAll(-1);
     }
 
@@ -1089,4 +1095,30 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
 }
 ```
+
+再`BinderCallback`中如果有事件返回会回调`handleEvent`，然后执行`IPCThreadState::handlePolledCommands`;再看看`handlePolledCommands`函数中执行了`getAndExecuteCommand`;`getAndExecuteCommand`在`IPCThreadState::joinThreadPool`函数中已经提到过了，是用于读取binder驱动的数据和命令字段的解析处理；
+
+```c
+status_t IPCThreadState::handlePolledCommands()
+{
+    status_t result;
+    //读取binder驱动数据，命令字段解析和处理
+    do {
+        result = getAndExecuteCommand();
+    } while (mIn.dataPosition() < mIn.dataSize());
+    //清空输入缓冲区
+    processPendingDerefs();
+    //执行完成指令，并把Client需要应答的参数写入binder驱动中
+    flushCommands();
+    return result;
+}
+```
+
+这样`ServiceManager`进程的启动和消息监听也就分析完成了！
+
+那我们要想想
+
+1. binder驱动是如果把Client端的数据进行一次拷贝到`ServiceManager`进程中来读取的呢？
+2. `ServiceManager`进程又是如何成为binder驱动的上下文管理者？
+3. binder驱动如何管理每个进程的binder服务呢？
 

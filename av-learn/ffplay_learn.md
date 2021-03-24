@@ -10,7 +10,7 @@
 
 参照雷神（[雷霄骅](https://blog.csdn.net/leixiaohua1020)）的FFplay的总体函数调用结构图，自己总结了一个最新版本的结构，其中还有诸多不足，以后有机会慢慢完善；如下图所示。
 
-<img src="./img/ffplay.png" alt="总结构图" style="zoom:50%;" />
+<img src="img/ffplay.png" alt="总结构图" style="zoom:50%;" />
 
 
 
@@ -20,7 +20,7 @@
 
 ### ffplay video的线程模式
 
-<img src="./img/ffplay_video.png" style="zoom:50%;" />
+<img src="img/ffplay_video.png" style="zoom:50%;" />
 
 ffplay选择了sdl作为显示SDK，以实现跨平台支持；因为使用了SDL，而video的显示也依赖SDL的窗口显示系统，所以先从main函数的SDL初始化看起：
 
@@ -1418,7 +1418,7 @@ static double get_clock(Clock *c)
 
 接下来主要讲以音频为主时钟的部分，大致流程如下：
 
-<img src="./img/ffplay_video_clock.png" style="zoom:60%;" />
+<img src="img/ffplay_video_clock.png" style="zoom:60%;" />
 
 在这个流程中，“计算上一帧显示时长”这一步骤至关重要。代码如下：
 
@@ -1544,7 +1544,7 @@ static void video_refresh(void *opaque, double *remaining_time)
 
 上一帧显示时刻加上delay（还应显示多久（含帧本身时长））即为上一帧应结束显示的时刻。具体原理看如下示意图：
 
-<img src="./img/ffplay_delay.png" style="zoom:50%;" />
+<img src="img/ffplay_delay.png" style="zoom:50%;" />
 
 这里给出了3种情况的示意图：
 
@@ -1606,7 +1606,7 @@ static double compute_target_delay(double delay, VideoState *is)
 
 ##### `sync_threshold`理解：
 
-<img src="./img/ffplay_sync_threshold.png" style="zoom:50%;" />
+<img src="img/ffplay_sync_threshold.png" style="zoom:50%;" />
 
 从图上可以看出来sync_threshold是建立一块区域，在这块区域内无需调整lastvp的显示时长，直接返回delay即可。也就是在这块区域内认为是准同步的。
 
@@ -1830,7 +1830,7 @@ static void frame_queue_push(FrameQueue *f)
 
 frame_queue的写过程总结示意图如下：
 
-<img src="./img/ffplay_framequeue.png" style="zoom:50%;" />
+<img src="img/ffplay_framequeue.png" style="zoom:50%;" />
 
 ##### FrameQueue的'读'操作
 
@@ -1903,7 +1903,7 @@ frame_queue_next(f);
 
 执行rindex操作前，需要先判断`rindex_shown`的值，如果为0，则赋1。如下图：
 
-<img src="./img/ffplay_framequeue_read.png" style="zoom:50%;" />
+<img src="img/ffplay_framequeue_read.png" style="zoom:50%;" />
 
 这里模拟了从初始化开始的2次“读”。
 
@@ -1954,7 +1954,7 @@ static int64_t frame_queue_last_pos(FrameQueue *f)
 
 看下节点位置：
 
-<img src="./img/ffplay_framequeue_index.png" style="zoom:50%;" />
+<img src="img/ffplay_framequeue_index.png" style="zoom:50%;" />
 
 
 
