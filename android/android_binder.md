@@ -1122,3 +1122,327 @@ status_t IPCThreadState::handlePolledCommands()
 2. `ServiceManager`进程又是如何成为binder驱动的上下文管理者？
 3. binder驱动如何管理每个进程的binder服务呢？
 
+## Binder Driver探索
+
+### binder驱动的初始化
+
+在binder.c中有以下一行代码；
+
+```c
+device_initcall(binder_init);
+```
+
+在Linux内核的启动过程中，一个驱动的注册用module_init调用，即device_initcall，它可以将驱动设备加载进内核中，以供后续使用。
+
+```c
+static int __init binder_init(void)
+{
+	int ret;
+	char *device_name, *device_tmp;
+	struct binder_device *device;
+	struct hlist_node *tmp;
+	char *device_names = NULL;
+	//初始化binder缓冲区分配
+	ret = binder_alloc_shrinker_init();
+	if (ret)
+		return ret;
+	// ~0U：无符号整型，对0取反。
+	atomic_set(&binder_transaction_log.cur, ~0U);
+	atomic_set(&binder_transaction_log_failed.cur, ~0U);
+ 	// 创建/sys/kernel/debug/binder目录。
+	binder_debugfs_dir_entry_root = debugfs_create_dir("binder", NULL);
+	// 创建/sys/kernel/debug/binder/proc目录用于记录每个进程基本信息。
+	if (binder_debugfs_dir_entry_root)
+		binder_debugfs_dir_entry_proc = debugfs_create_dir("proc",
+						 binder_debugfs_dir_entry_root);
+
+	if (binder_debugfs_dir_entry_root) {
+		// 创建/sys/kernel/debug/binder/state文件用于记录状态信息，
+		//并注册操作函数binder_state_fops。
+		debugfs_create_file("state",
+				    0444,
+				    binder_debugfs_dir_entry_root,
+				    NULL,
+				    &binder_state_fops);
+		// 创建/sys/kernel/debug/binder/stats文件用于记录统计信息，
+		//并注册操作函数binder_stats_fops。			
+		debugfs_create_file("stats",
+				    0444,
+				    binder_debugfs_dir_entry_root,
+				    NULL,
+				    &binder_stats_fops);
+		 // 创建/sys/kernel/debug/binder/transactions文件用于记录transaction相关信息，
+		 //并注册操作函数binder_transactions_fops。
+		debugfs_create_file("transactions",
+				    0444,
+				    binder_debugfs_dir_entry_root,
+				    NULL,
+				    &binder_transactions_fops);
+		// 创建/sys/kernel/debug/binder/transaction_log文件用于记录transaction日志相关信息，
+		//并注册操作函数binder_transaction_log_fops。
+		debugfs_create_file("transaction_log",
+				    0444,
+				    binder_debugfs_dir_entry_root,
+				    &binder_transaction_log,
+				    &binder_transaction_log_fops);
+		// 创建/sys/kernel/debug/binder/failed_transaction_log文件用于记录transaction失败日志相关信息，
+		// 并注册操作函数binder_transaction_log_fops
+		debugfs_create_file("failed_transaction_log",
+				    0444,
+				    binder_debugfs_dir_entry_root,
+				    &binder_transaction_log_failed,
+				    &binder_transaction_log_fops);
+	}
+
+	if (!IS_ENABLED(CONFIG_ANDROID_BINDERFS) &&
+	    strcmp(binder_devices_param, "") != 0) {
+		/*
+		* Copy the module_parameter string, because we don't want to
+		* tokenize it in-place.
+		 */
+		// kzalloc：分配不超过128KB的连续的物理内存映射区域。
+    	// GFP_KERNEL：内存分配器flags，无内存可用时可引起休眠，允许启动磁盘IO和文件系统IO。
+    	// binder_devices_param：binder，hwbinder，vndbinder。
+		device_names = kstrdup(binder_devices_param, GFP_KERNEL);
+		if (!device_names) {
+			ret = -ENOMEM;
+			goto err_alloc_device_names_failed;
+		}
+		 // 创建binder设备
+		device_tmp = device_names;
+		while ((device_name = strsep(&device_tmp, ","))) {
+			ret = init_binder_device(device_name);
+			if (ret)
+				goto err_init_binder_device_failed;
+		}
+	}
+	//初始化binder文件系统
+	ret = init_binderfs();
+	if (ret)
+		goto err_init_binder_device_failed;
+
+	return ret;
+
+err_init_binder_device_failed:
+	hlist_for_each_entry_safe(device, tmp, &binder_devices, hlist) {
+		misc_deregister(&device->miscdev);
+		hlist_del(&device->hlist);
+		kfree(device);
+	}
+
+	kfree(device_names);
+
+err_alloc_device_names_failed:
+	debugfs_remove_recursive(binder_debugfs_dir_entry_root);
+
+	return ret;
+}
+```
+
+`binder_init`函数主要内容是：
+
+- 初始化binder缓冲区分配
+- 创建了sys/kernel/debug/binder目录，以及其子目录或文件
+- 注册misc设备，创建binder设备
+
+那来看看`init_binder_device`是如何注册misc设备，创建binder设备，代码如下：
+
+```c
+static int __init init_binder_device(const char *name)
+{
+	int ret;
+	struct binder_device *binder_device;
+
+	binder_device = kzalloc(sizeof(*binder_device), GFP_KERNEL);
+	if (!binder_device)
+		return -ENOMEM;
+	//miscdevice结构体
+	binder_device->miscdev.fops = &binder_fops; //设备的文件操作结构，这是file_operations结构
+	binder_device->miscdev.minor = MISC_DYNAMIC_MINOR;//次设备号 动态分配
+	binder_device->miscdev.name = name;//设备名
+	//binder设备的引用计数
+	refcount_set(&binder_device->ref, 1);
+	//默认binder驱动的上下文管理者
+	binder_device->context.binder_context_mgr_uid = INVALID_UID;
+	binder_device->context.name = name;
+	mutex_init(&binder_device->context.context_mgr_node_lock);
+	// 注册misc设备
+	ret = misc_register(&binder_device->miscdev);
+	if (ret < 0) {
+		kfree(binder_device);
+		return ret;
+	}
+	// 通过全局链表binder_devices管理binder_device。
+	hlist_add_head(&binder_device->hlist, &binder_devices);
+
+	return ret;
+}
+```
+
+从`init_binder_device`函数看出binder驱动设备节点是通过`binder_device`结构体管理的；设置`binder_device`的`miscdev`参数，`miscdev`其实是`miscdevice`结构体，misc_register函数注册misc设备，`miscdevice`参数分别是：
+
+1. 设备的文件操作结构，这是file_operations结构
+2. 次设备号 动态分配
+3. 设备名
+
+`binder_device`结构体定义如下：
+
+```c
+struct binder_device {
+	// 加入binder_devices全局链表。
+	struct hlist_node hlist;
+	  // misc设备。
+	struct miscdevice miscdev;
+	 // 获取service manager对应的binder_node。
+	struct binder_context context;
+	//属于bindfs挂载的超级块的根节点的inode。
+	struct inode *binderfs_inode;
+	//binder_device的引用计数
+	refcount_t ref;
+};
+```
+
+`file_operations`结构体,指定相应文件操作的方法
+
+```c
+const struct file_operations binder_fops = {
+	.owner = THIS_MODULE,
+	.poll = binder_poll,
+	.unlocked_ioctl = binder_ioctl,
+	.compat_ioctl = compat_ptr_ioctl,
+	.mmap = binder_mmap,
+	.open = binder_open,
+	.flush = binder_flush,
+	.release = binder_release,
+};
+```
+
+用户态的程序调用Kernel层驱动是需要陷入内核态，进行系统调用(`syscall`)，比如打开Binder驱动方法的调用链为： open-> __open() -> binder_open()。通过`binder_fops`的定义得出以下调用规则；
+
+<img src="img/binder_syscall.png" alt="binder_syscall"/>
+
+[图片来源](http://gityuan.com/2015/11/01/binder-driver/)
+
+### binder_open
+
+之前已经提到每个进程都会单独创建自己的`ProcessState`，`ProcessState`是进程唯一的；在`ProcessState`创建时会调用`open`函数，那对应调用的就是binder驱动中的`binder_open`;
+
+```c
+static int binder_open(struct inode *nodp, struct file *filp)
+{
+	struct binder_proc *proc, *itr;
+	struct binder_device *binder_dev;
+	struct binderfs_info *info;
+	struct dentry *binder_binderfs_dir_entry_proc = NULL;
+	bool existing_pid = false;
+
+	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "%s: %d:%d\n", __func__,
+		     current->group_leader->pid, current->pid);
+	//创建binder驱动中管理IPC和保存进程信息的根结构体	
+	proc = kzalloc(sizeof(*proc), GFP_KERNEL);
+	if (proc == NULL)
+		return -ENOMEM;
+	// 初始化两个自旋锁。
+    // inner_lock保护线程、binder_node以及所有与进程相关的的todo队列。
+    // outer_lock保护binder_ref。
+	spin_lock_init(&proc->inner_lock);
+	spin_lock_init(&proc->outer_lock);
+	// 获取当前进程组领头进程。
+	get_task_struct(current->group_leader);
+	proc->tsk = current->group_leader;//将当前进程的task_struct保存到binder_proc
+	INIT_LIST_HEAD(&proc->todo);//初始化todo列表
+	// 判断当前进程的调度策略是否支持，binder只支持SCHED_NORMAL(00b)、SCHED_FIFO(01b)、SCHED_RR(10b)、SCHED_BATCH(11b)。
+    // prio为进程优先级，可通过normal_prio获取。一般分为实时优先级及静态优先级。
+	if (binder_supported_policy(current->policy)) {
+		proc->default_priority.sched_policy = current->policy;
+		proc->default_priority.prio = current->normal_prio;
+	} else {
+		proc->default_priority.sched_policy = SCHED_NORMAL;
+		proc->default_priority.prio = NICE_TO_PRIO(0);
+	}
+
+	/* binderfs stashes devices in i_private */
+	 // 通过miscdev获取binder_device。
+	if (is_binderfs_device(nodp)) {
+		binder_dev = nodp->i_private;
+		info = nodp->i_sb->s_fs_info;
+		binder_binderfs_dir_entry_proc = info->proc_log_dir;
+	} else {
+		binder_dev = container_of(filp->private_data,
+					  struct binder_device, miscdev);
+	}
+	//binder_device的引用计数加1
+	refcount_inc(&binder_dev->ref);
+	//初始化对应进程中的binder驱动上下文管理者
+	proc->context = &binder_dev->context;
+	// 初始化binder_proc的binder_alloc字段。
+	binder_alloc_init(&proc->alloc);
+
+	// binder驱动维护静态全局数组binder_stats，其中有一个成员数组obj_created。
+    // 当binder_open调用时，obj_created[BINDER_STAT_PROC]将自增。该数组用来统计binder对象的数量。
+	binder_stats_created(BINDER_STAT_PROC);
+	//初始化binder_proc的pid为领头进程的pid值。
+	proc->pid = current->group_leader->pid;
+	// 初始化delivered_death及waiting_threads队列。
+	INIT_LIST_HEAD(&proc->delivered_death);
+	INIT_LIST_HEAD(&proc->waiting_threads);
+	// private_data保存binder_proc对象。
+	filp->private_data = proc;
+ 	// 将binder_proc加入到全局队列binder_procs中,该操作必须加锁。
+	mutex_lock(&binder_procs_lock);
+	hlist_for_each_entry(itr, &binder_procs, proc_node) {
+		if (itr->pid == proc->pid) {
+			existing_pid = true;
+			break;
+		}
+	}
+	hlist_add_head(&proc->proc_node, &binder_procs);
+	mutex_unlock(&binder_procs_lock);
+   	// 若/sys/kernel/binder/proc目录已经创建好，则在该目录下创建一个以pid为名的文件。
+	if (binder_debugfs_dir_entry_proc && !existing_pid) {
+		char strbuf[11];
+
+		snprintf(strbuf, sizeof(strbuf), "%u", proc->pid);
+		/*
+		 * proc debug entries are shared between contexts.
+		 * Only create for the first PID to avoid debugfs log spamming
+		 * The printing code will anyway print all contexts for a given
+		 * PID so this is not a problem.
+		 */
+		// proc调试条目在上下文之间共享，如果进程尝试使用其他上下文再次打开驱动程序，则此操作将失败。
+		proc->debugfs_entry = debugfs_create_file(strbuf, 0444,
+			binder_debugfs_dir_entry_proc,
+			(void *)(unsigned long)proc->pid,
+			&proc_fops);
+	}
+
+	if (binder_binderfs_dir_entry_proc && !existing_pid) {
+		char strbuf[11];
+		struct dentry *binderfs_entry;
+
+		snprintf(strbuf, sizeof(strbuf), "%u", proc->pid);
+		/*
+		 * Similar to debugfs, the process specific log file is shared
+		 * between contexts. Only create for the first PID.
+		 * This is ok since same as debugfs, the log file will contain
+		 * information on all contexts of a given PID.
+		 */
+		binderfs_entry = binderfs_create_file(binder_binderfs_dir_entry_proc,
+			strbuf, &proc_fops, (void *)(unsigned long)proc->pid);
+		if (!IS_ERR(binderfs_entry)) {
+			proc->binderfs_entry = binderfs_entry;
+		} else {
+			int error;
+
+			error = PTR_ERR(binderfs_entry);
+			pr_warn("Unable to create file %s in binderfs (error %d)\n",
+				strbuf, error);
+		}
+	}
+
+	return 0;
+}
+```
+
+从`binder_open`函数的主要工作是创建`binder_proc`结构体，并把当前进程等信息保存到`binder_proc`，初始化`binder_proc`中管理IPC所需的各种信息并创建其它相关的子结构体；再把`binder_proc`保存到文件指针`filp`，以及把`binder_proc`加入到全局链表。
+
