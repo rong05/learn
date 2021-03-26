@@ -1134,6 +1134,8 @@ device_initcall(binder_init);
 
 在Linux内核的启动过程中，一个驱动的注册用module_init调用，即device_initcall，它可以将驱动设备加载进内核中，以供后续使用。
 
+在Android8.0之后，现在Binder驱动有三个：/dev/binder; /dev/hwbinder; /dev/vndbinder.
+
 ```c
 static int __init binder_init(void)
 {
@@ -1244,6 +1246,7 @@ err_alloc_device_names_failed:
 - 初始化binder缓冲区分配
 - 创建了sys/kernel/debug/binder目录，以及其子目录或文件
 - 注册misc设备，创建binder设备
+- 把binder_device加入到全局链表binder_devices进行管理
 
 那来看看`init_binder_device`是如何注册misc设备，创建binder设备，代码如下：
 
@@ -1289,7 +1292,7 @@ static int __init init_binder_device(const char *name)
 
 ```c
 struct binder_device {
-	// 加入binder_devices全局链表。
+	// 加入binder_devices全局链表的node。
 	struct hlist_node hlist;
 	  // misc设备。
 	struct miscdevice miscdev;
@@ -1444,5 +1447,78 @@ static int binder_open(struct inode *nodp, struct file *filp)
 }
 ```
 
-从`binder_open`函数的主要工作是创建`binder_proc`结构体，并把当前进程等信息保存到`binder_proc`，初始化`binder_proc`中管理IPC所需的各种信息并创建其它相关的子结构体；再把`binder_proc`保存到文件指针`filp`，以及把`binder_proc`加入到全局链表。
+从`binder_open`函数的主要工作是创建`binder_proc`结构体，并把当前进程等信息保存到`binder_proc`，初始化`binder_proc`中管理IPC所需的各种信息并创建其它相关的子结构体；再把`binder_proc`保存到文件指针`filp`，以及把`binder_proc`加入到全局链表`binder_procs`，这一个双向链表结构。
+
+```c
+struct binder_proc {
+	//加入binder_procs全局链表的node节点。
+	struct hlist_node proc_node;
+	//记录执行传输动作的线程信息, binder_thread红黑树的根节点
+	struct rb_root threads;
+	//用于记录binder实体  ,binder_node红黑树的根节点，它是Server在Binder驱动中的体现
+	struct rb_root nodes;
+	//binder_ref红黑树的根节点(以handle为key
+	struct rb_root refs_by_desc;
+	//binder_ref红黑树的根节点（以ptr为key）
+	struct rb_root refs_by_node;
+	//该binder进程的线程池中等待处理binder_work的binder_thread链表
+	struct list_head waiting_threads;
+	//相应进程id
+	int pid;
+	//相应进程的task结构体
+	struct task_struct *tsk;
+	
+	struct hlist_node deferred_work_node;
+	int deferred_work;
+	bool is_dead;
+
+	//进程将要做的事
+	struct list_head todo;
+	//binder统计信息
+	struct binder_stats stats;
+	//已分发的死亡通知
+	struct list_head delivered_death;
+	//最大线程数
+	int max_threads;
+	//请求的线程数
+	int requested_threads;
+	//已启动的请求线程数
+	int requested_threads_started;
+	int tmp_ref;
+	//默认优先级
+	struct binder_priority default_priority;
+	struct dentry *debugfs_entry;
+	 //进程通信数据内存分配相关
+	struct binder_alloc alloc;
+	//binder驱动的上下文管理者
+	struct binder_context *context;
+	spinlock_t inner_lock;
+	spinlock_t outer_lock;
+	struct dentry *binderfs_entry;
+};
+struct binder_alloc {
+	struct mutex mutex;
+	//指向进程虚拟地址空间的指针
+	struct vm_area_struct *vma;
+	//相应进程的内存结构体
+	struct mm_struct *vma_vm_mm;
+	// map 的地址就是这里了
+	void __user *buffer;
+	//所有的buffers列表
+	struct list_head buffers;
+	//只进行了预定，没有分配，按大小排序
+	struct rb_root free_buffers;
+	//已经分配了,按地址排序
+	struct rb_root allocated_buffers;
+	//用于异步请求的空间
+	size_t free_async_space;
+	//所有的pages指向物理内存页 
+	struct binder_lru_page *pages;
+	//映射的内核空间大小
+	size_t buffer_size;
+	uint32_t buffer_free;
+	int pid;
+	size_t pages_high;
+};
+```
 
