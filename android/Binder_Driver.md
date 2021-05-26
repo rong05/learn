@@ -325,6 +325,8 @@ static int binder_open(struct inode *nodp, struct file *filp)
 
 从`binder_open`函数的主要工作是创建`binder_proc`结构体，并把当前进程等信息保存到`binder_proc`，初始化`binder_proc`中管理IPC所需的各种信息并创建其它相关的子结构体；再把`binder_proc`保存到文件指针`filp`，以及把`binder_proc`加入到全局链表`binder_procs`，这一个双向链表结构。
 
+### binder_procs结构体
+
 ```c
 struct binder_proc {
   //加入binder_procs全局链表的node节点。
@@ -541,6 +543,8 @@ static void binder_insert_free_buffer(struct binder_alloc *alloc,
 
 `binder_mmap`通过加锁，保证一次只有一个进程分配内存，保证多进程间的并发访问。将分配一块内核空间缓冲区buffer加入到红黑树alloc->free_buffers中，表示当前buffer是空闲buffer；每一次Binder传输数据时，都会先从Binder内存缓存区中分配一个binder_buffer来存储传输数据。
 
+### binder_buffer结构体
+
 ```c
 struct binder_buffer {
   //buffer实体的地址
@@ -581,6 +585,12 @@ struct binder_lru_page {
 
 1. 用户空间给`binder`驱动传入信息时，都需要内存拷贝；
 2. `binder`驱动给发送用户空间则不需要；
+
+### 物理内存的分配和释放
+
+`binder_update_page_range`函数主要的作用是分配和释放物理内存；
+
+
 
 ## binder_ioctl
 
