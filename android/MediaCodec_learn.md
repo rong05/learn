@@ -1,4 +1,12 @@
-# MediaCodec学习记录
+---
+title: "MediaCodec学习记录"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories: [android]
+tags:
+  - android
+  - Media
+---
 
 官方API：https://developer.android.google.cn/reference/android/media/MediaCodec
 
@@ -16,7 +24,7 @@ MediaCodec采用异步方式处理数据，并且使用了一组输入输出buff
 2. MediaCodec处理完这些数据并将处理结果输出至一个空的输出buffer（ByteBuffer）中。
 3. 使用者从MediaCodec获取输出buffer的数据，消耗掉里面的数据，使用完输出buffer的数据之后，将其释放回编解码器。
 
-<img src="./img/mediaCodec_server.png" style="zoom:50%;" />
+<img src="./../img/mediaCodec_server.png" style="zoom:50%;" />
 
 ## 编解码器支持的数据类型：
 
@@ -56,7 +64,7 @@ MediaCodec的生命周期有三种状态：Stopped、Executing、Released。
 - Stopped，包含三种子状态：Uninitialized、Configured、Error。
 - Executing，包含三种子状态：Flushed、Running、End-of-Stream。
 
-<img src="./img/mediacodec_state.png" style="zoom:50%;" />
+<img src="./../img/mediacodec_state.png" style="zoom:50%;" />
 
 **Stopped**的三种子状态：
 
@@ -87,7 +95,7 @@ MediaCodec的生命周期有三种状态：Stopped、Executing、Released。
     …
     codec.queueInputBuffer(inputBufferId, …);
   }
- 
+
   @Override
   void onOutputBufferAvailable(MediaCodec mc, int outputBufferId, …) {//开始出队
     ByteBuffer outputBuffer = codec.getOutputBuffer(outputBufferId);
@@ -97,14 +105,14 @@ MediaCodec的生命周期有三种状态：Stopped、Executing、Released。
     …
     codec.releaseOutputBuffer(outputBufferId, …);
   }
- 
+
   @Override
   void onOutputFormatChanged(MediaCodec mc, MediaFormat format) {//输出格式发生变化
     // Subsequent data will conform to new format.
     // Can ignore if using getOutputFormat(outputBufferId)
     mOutputFormat = format; // option B
   }
- 
+
   @Override
   void onError(…) {//出现异常
     …

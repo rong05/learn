@@ -1,10 +1,19 @@
-# camx
+---
+title: "高通camx框架"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories:
+  - camera
+tags:
+  - camera
+  - qcom
+---
 
 ## 高通camx框架
 
 目前高通主流芯片使用camera框架基本都是camx架构。 之前旧的架构叫做mm-camera，camx架构和之前架构代码更加复杂、具有较强的客制化。 我们先来看下camx整体的架构图：
 
-![camx.png](image/camx.png)
+![camx.png](./../image/camx.png)
 
 - camx的框架入口为camx包中的`camxhal3entry.cpp`，代码路径在`vendor/qcom/proprietary/camx/`下,编译结果是`camera.qcom.so`
 - Camx通过`chxentensionInterface`调用到chi-cdk包下的代码，这里面一般是手机厂商自己定制功能的地方，代码目录在`vendor/qcom/proprietary/chi-cdk/`，编译结果是`com.qti.chi.override.so`
@@ -15,7 +24,7 @@
 
 在camx框架上大致的camera数据流向如下图：
 
-![camera-stream.png](image/camera-stream.png)
+![camera-stream.png](./../image/camera-stream.png)
 
 - CSID: 摄像机串行接口解码器模块
 - IFE：图像前端

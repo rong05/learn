@@ -1,4 +1,10 @@
-# Binder通讯原理
++++
+title = "Binder通讯原理"
+date =  2023-12-06T10:36:27+08:00
+draft = true
+categories = ["android"]
+tags = ["android", "binder"]
++++
 
 *基于Android 11的源码剖析，笔记记录binder通讯原理的实现过程*；
 
@@ -356,7 +362,7 @@ status_t IPCThreadState::getAndExecuteCommand()
 
 大概流程图如下：
 
-<img src="img/defaultServiceManager.png" style="zoom:50%;" />
+<img src="./../img/defaultServiceManager.png" style="zoom:50%;" />
 
 `defaultServiceManager`函数代码如下：
 
@@ -513,7 +519,7 @@ Android 10在此之后，`BpServiceManager` 不再通过手动实现，而是采
 
 `BpServiceManager`的继承关系图如下：
 
-<img src="img/BpServiceManager.png" style="zoom:40%;" />
+<img src="./../img/BpServiceManager.png" style="zoom:40%;" />
 
 ## Binder 数据传输流程
 
@@ -716,7 +722,7 @@ status_t IPCThreadState::writeTransactionData(int32_t cmd, uint32_t binderFlags,
 
 `binder_transaction_data`结构体在中组装的`Parcel`数据：
 
-<img src="img/binder_transaction_data.png" style="zoom:30%;" />
+<img src="./../img/binder_transaction_data.png" style="zoom:30%;" />
 
 ​															[图片来源](http://palanceli.com/2016/05/08/2016/0514BinderLearning3/ )
 
@@ -851,10 +857,10 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
     bwr.read_consumed = 0;
     status_t err;
     do {
-       
+
 #if defined(__ANDROID__)
         //通过ioctl写入binder驱动
-        if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0) 
+        if (ioctl(mProcess->mDriverFD, BINDER_WRITE_READ, &bwr) >= 0)
             err = NO_ERROR;
         else
             err = -errno;
@@ -1044,7 +1050,7 @@ Status ServiceManager::addService(const std::string& name, const sp<IBinder>& bi
 
 数据传递过程如下：
 
-![binder数据传递](img/binder_write_read.png)
+![binder数据传递](./../img/binder_write_read.png)
 
 ## `ServiceManager`进程创建
 
@@ -1068,7 +1074,7 @@ int main(int argc, char** argv) {
   	//设置最大线程数为了0
     ps->setThreadPoolMaxThreadCount(0);
     ps->setCallRestriction(ProcessState::CallRestriction::FATAL_IF_NOT_ONEWAY);
-  
+
   //创建ServiceManager实例
     sp<ServiceManager> manager = new ServiceManager(std::make_unique<Access>());
     if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
@@ -1078,7 +1084,7 @@ int main(int argc, char** argv) {
     IPCThreadState::self()->setTheContextObject(manager);
   	//设置ServiceManager进程为binder的上下文管理者
     ps->becomeContextManager(nullptr, nullptr);
-  
+
   	//创建looper
     sp<Looper> looper = Looper::prepare(false /*allowNonCallbacks*/);
 		//创建looper事件监听回调

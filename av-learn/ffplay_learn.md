@@ -1,8 +1,13 @@
-[TOC]
-
-
-
-# ffplay源码分析
+---
+title: "ffplay源码分析"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories:
+    - Media
+tags:
+  - av-learn
+  - ffmpeg
+---
 
 熟悉FFmpeg项目从源码看起，以下是我阅读FFplay的源代码的总结；FFplay是FFmpeg项目提供的播放器示例，它的源代码的量也是不少的，其中很多知识点是我们可以学习和借鉴的。
 
@@ -10,7 +15,7 @@
 
 参照雷神（[雷霄骅](https://blog.csdn.net/leixiaohua1020)）的FFplay的总体函数调用结构图，自己总结了一个最新版本的结构，其中还有诸多不足，以后有机会慢慢完善；如下图所示。
 
-<img src="img/ffplay.png" alt="总结构图" style="zoom:50%;" />
+<img src="./../img/ffplay.png" alt="总结构图" style="zoom:50%;" />
 
 
 
@@ -20,7 +25,7 @@
 
 ### ffplay video的线程模式
 
-<img src="img/ffplay_video.png" style="zoom:50%;" />
+<img src="./../img/ffplay_video.png" style="zoom:50%;" />
 
 ffplay选择了sdl作为显示SDK，以实现跨平台支持；因为使用了SDL，而video的显示也依赖SDL的窗口显示系统，所以先从main函数的SDL初始化看起：
 
@@ -52,11 +57,11 @@ int main(int argc, char **argv)
 
     SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
-		
+
   	//注册flush packet 只是一个标记作用，用于packet队列中，在对packet队列分析时有说明
     av_init_packet(&flush_pkt);
     flush_pkt.data = (uint8_t *)&flush_pkt;
-  
+
  ...
        if (!display_disable)
     {
@@ -360,7 +365,7 @@ int av_find_best_stream(AVFormatContext *ic,
 
    ```c
        codec = avcodec_find_decoder(avctx->codec_id); //找到对应的解码器
-   
+
        switch (avctx->codec_type)
        {
        case AVMEDIA_TYPE_AUDIO:
@@ -376,7 +381,7 @@ int av_find_best_stream(AVFormatContext *ic,
            forced_codec_name = video_codec_name;
            break;
        }
-   
+
        //通过编码器的名字，来打开对应的解码器
        if (forced_codec_name)
            codec = avcodec_find_decoder_by_name(forced_codec_name);
@@ -404,7 +409,7 @@ int av_find_best_stream(AVFormatContext *ic,
    ```c
            is->video_stream = stream_index;
            is->video_st = ic->streams[stream_index];
-   
+
            decoder_init(&is->viddec, avctx, &is->videoq, is->continue_read_thread);
            if ((ret = decoder_start(&is->viddec, video_thread, "video_decoder", is)) < 0)
                goto out;
@@ -423,7 +428,7 @@ int av_find_best_stream(AVFormatContext *ic,
        d->start_pts = AV_NOPTS_VALUE;
        d->pkt_serial = -1;
    }
-   
+
    static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void *arg)
    {
        packet_queue_start(d->queue);
@@ -623,7 +628,7 @@ ffmpeg有专门针对暂停和恢复的函数，所以直接调用就可以了�
         if (infinite_buffer < 1 &&
             (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE //所有流队列缓冲大小总和大于MAX_QUEUE_SIZE（15M）时
             || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) //各种流都已有够用的包
-            &&stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) 
+            &&stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq)
             &&stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq))))
         {
             /* wait 10 ms */
@@ -659,9 +664,9 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
 
 ```c
     if (!is->paused &&
-            (!is->audio_st || (is->auddec.finished == is->audioq.serial 
-                               && frame_queue_nb_remaining(&is->sampq) == 0)) 
-        											&&(!is->video_st || (is->viddec.finished == is->videoq.serial 
+            (!is->audio_st || (is->auddec.finished == is->audioq.serial
+                               && frame_queue_nb_remaining(&is->sampq) == 0))
+        											&&(!is->video_st || (is->viddec.finished == is->videoq.serial
                              && frame_queue_nb_remaining(&is->pictq) == 0)))
         {
             if (loop != 1 && (!loop || --loop))
@@ -749,9 +754,9 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
         {
             packet_queue_put(&is->audioq, pkt);
         }
-        else if (pkt->stream_index == is->video_stream 
-                 && pkt_in_play_range 
-                 && !(is->video_st->disposition 
+        else if (pkt->stream_index == is->video_stream
+                 && pkt_in_play_range
+                 && !(is->video_st->disposition
                       & AV_DISPOSITION_ATTACHED_PIC))
         {
             packet_queue_put(&is->videoq, pkt);
@@ -804,8 +809,8 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
         if (!ret)
             continue;
             //获取当前帧播放时长
-            duration = (frame_rate.num && 
-                        frame_rate.den ? 
+            duration = (frame_rate.num &&
+                        frame_rate.den ?
                         av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
             //当前帧显示时间戳
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
@@ -958,7 +963,7 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub)
                     d->packet_pending = 1;
                     av_packet_move_ref(&d->pkt, &pkt);
                 }
-   
+
             av_packet_unref(&pkt);
         }
     }
@@ -1280,7 +1285,7 @@ static int audio_decode_frame(VideoState *is)
     audio_clock0 = is->audio_clock;
     /* update the audio clock with the pts */
     //4. 更新audio_clock，audio_clock_serial,更新pts  这个pts 等于当前的帧包含的所有帧数
-    if (!isnan(af->pts)) 
+    if (!isnan(af->pts))
         is->audio_clock = af->pts + (double)af->frame->nb_samples / af->frame->sample_rate;
     else
         is->audio_clock = NAN;
@@ -1418,7 +1423,7 @@ static double get_clock(Clock *c)
 
 接下来主要讲以音频为主时钟的部分，大致流程如下：
 
-<img src="img/ffplay_video_clock.png" style="zoom:60%;" />
+<img src="./../img/ffplay_video_clock.png" style="zoom:60%;" />
 
 在这个流程中，“计算上一帧显示时长”这一步骤至关重要。代码如下：
 
@@ -1450,7 +1455,7 @@ static void video_refresh(void *opaque, double *remaining_time)
 
              /*如果将要显示的一帧的序列与现在解码的不同就直接抛弃*/
               if (vp->serial != is->videoq.serial)
-              { 
+              {
                   frame_queue_next(&is->pictq);//移动读索引
                   goto retry;//重新获取
               }
@@ -1519,7 +1524,7 @@ static void video_refresh(void *opaque, double *remaining_time)
               /*上一帧与将要显示这一帧之间的duration用来计算将要显示这一帧的播放时间
               将要显示这一帧与上一帧之间的duration用来计算是否丢弃将要显示这一帧*/
             ...
-              frame_queue_next(&is->pictq); 
+              frame_queue_next(&is->pictq);
               is->force_refresh = 1;//刷新画面
 
               if (is->step && !is->paused)
@@ -1527,9 +1532,9 @@ static void video_refresh(void *opaque, double *remaining_time)
           }
       display:
           /* display picture */
-          if (!display_disable 
-              && is->force_refresh 
-              && is->show_mode == SHOW_MODE_VIDEO 
+          if (!display_disable
+              && is->force_refresh
+              && is->show_mode == SHOW_MODE_VIDEO
               && is->pictq.rindex_shown)
               video_display(is);//显示视频
       }
@@ -1544,7 +1549,7 @@ static void video_refresh(void *opaque, double *remaining_time)
 
 上一帧显示时刻加上delay（还应显示多久（含帧本身时长））即为上一帧应结束显示的时刻。具体原理看如下示意图：
 
-<img src="img/ffplay_delay.png" style="zoom:50%;" />
+<img src="./../img/ffplay_delay.png" style="zoom:50%;" />
 
 这里给出了3种情况的示意图：
 
@@ -1606,7 +1611,7 @@ static double compute_target_delay(double delay, VideoState *is)
 
 ##### `sync_threshold`理解：
 
-<img src="img/ffplay_sync_threshold.png" style="zoom:50%;" />
+<img src="./../img/ffplay_sync_threshold.png" style="zoom:50%;" />
 
 从图上可以看出来sync_threshold是建立一块区域，在这块区域内无需调整lastvp的显示时长，直接返回delay即可。也就是在这块区域内认为是准同步的。
 
@@ -1830,7 +1835,7 @@ static void frame_queue_push(FrameQueue *f)
 
 frame_queue的写过程总结示意图如下：
 
-<img src="img/ffplay_framequeue.png" style="zoom:50%;" />
+<img src="./../img/ffplay_framequeue.png" style="zoom:50%;" />
 
 ##### FrameQueue的'读'操作
 
@@ -1903,7 +1908,7 @@ frame_queue_next(f);
 
 执行rindex操作前，需要先判断`rindex_shown`的值，如果为0，则赋1。如下图：
 
-<img src="img/ffplay_framequeue_read.png" style="zoom:50%;" />
+<img src="./../img/ffplay_framequeue_read.png" style="zoom:50%;" />
 
 这里模拟了从初始化开始的2次“读”。
 
@@ -1954,7 +1959,7 @@ static int64_t frame_queue_last_pos(FrameQueue *f)
 
 看下节点位置：
 
-<img src="img/ffplay_framequeue_index.png" style="zoom:50%;" />
+<img src="./../img/ffplay_framequeue_index.png" style="zoom:50%;" />
 
 
 

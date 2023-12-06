@@ -1,4 +1,12 @@
-# MediaCodec源码学习
+---
+title: "MediaCodec源码学习"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories: [android]
+tags:
+  - android
+  - Media
+---
 
 在另一个篇文章中已经介绍了`MediaCodec`的API，详情请看[MediaCodec_learn](./MediaCodec_learn.md);
 
@@ -10,7 +18,7 @@
 
 `MediaCodec`主要框架结构如：
 
-<img src="./img/mediacodec-structure.png" alt="mediacodec-structure" style="zoom:40%;" />
+<img src="./../img/mediacodec-structure.png" alt="mediacodec-structure" style="zoom:40%;" />
 
 1. 应用代码编写时使用的是java层`MediaCodec`的接口。这里主要是通过JNI调用Native代码。
 2. 进入JNI代码后，主要与`JMediaCodec`打交道，`JMediaCodec`负责调用`MediaCodec(c++)`的方法。
@@ -37,7 +45,7 @@
         }
         mCallbackHandler = mEventHandler;
         mOnFrameRenderedHandler = mEventHandler;
-		
+
         mBufferLock = new Object();
 
         // save name used at creation
@@ -144,7 +152,7 @@ private:
     //……
 protected:
     //……
-    virtual void onMessageReceived(const sp<AMessage> &msg);  
+    virtual void onMessageReceived(const sp<AMessage> &msg);
 };
 
 JMediaCodec::JMediaCodec(
@@ -159,7 +167,7 @@ JMediaCodec::JMediaCodec(
     mObject = env->NewWeakGlobalRef(thiz);
 
     cacheJavaObjects(env);
-          
+
     //创建looper,looper主要负责消息的派发和提供线程环境用于消息的执行
     mLooper = new ALooper;
     mLooper->setName("MediaCodec_looper");
@@ -169,7 +177,7 @@ JMediaCodec::JMediaCodec(
             false,      // runOnCallingThread
             true,       // canCallJava
             ANDROID_PRIORITY_VIDEO);
-    //创建MediaCodec(c++)对象      
+    //创建MediaCodec(c++)对象
     if (nameIsType) {
         mCodec = MediaCodec::CreateByType(mLooper, name, encoder, &mInitStatus);
         if (mCodec == nullptr || mCodec->getName(&mNameAtCreation) != OK) {

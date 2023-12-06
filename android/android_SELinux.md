@@ -1,4 +1,12 @@
-# android SELinux权限配置
+---
+title: "android SELinux权限配置"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories: [android]
+tags:
+  - android
+  - selinux
+---
 
 ## SELinux policy介绍
 
@@ -8,7 +16,7 @@
 
 ​	进程的SContext可通过ps -Z命令来查看，如下图所示：
 
-<img src="./img/ps-z.png" alt="img"  />
+<img src="./../img/ps-z.png" alt="img"  />
 
 ​	以第一个进程/init的SContext为例，其值是u:r:init:s0,其中：
 
@@ -21,7 +29,7 @@
 
 ​	文件的SContext可通过ls -Z来查看，如下图所示：
 
-![img](./img/ls-z.png)
+![img](./../img/ls-z.png)
 
 ​	以最常见到的audioserver为例，其信息为u:object_r:audioserver_exec:s0:
 
@@ -167,7 +175,7 @@ chr_file - 字符设备 file - 普通文件 dir - 目录
    ```
    type demo_prop,property_type
    ```
-   
+
 2. 在property_context中绑定system property的安全上下文
 
    ```
@@ -194,7 +202,7 @@ chr_file - 字符设备 file - 普通文件 dir - 目录
 
    ```
    cookoo.uart.service                            u:object_r:cookoo_service:s0
-   
+
    # cookoo.uart.service是bind通信中ServiceManager绑定的名称
    ```
 
@@ -202,7 +210,7 @@ chr_file - 字符设备 file - 普通文件 dir - 目录
 
    ```
    type cookoo_service,              service_manager_type;
-   
+
    # 这个意思是将cookoo_service类型的服务绑定service_manager_type类型
    app_api_service - 应用的api类型服务 system_api_service - 系统的api类型服务
    system_server_service - 系统类型服务 service_manager_type - ServiceManager标签类型
@@ -213,7 +221,7 @@ chr_file - 字符设备 file - 普通文件 dir - 目录
    ```
    在相应源.te文件添加服务绑定的安全类型，如下
    binder_call(cookoosvc, system_app)
-   
+
    并在system_app.te下添加service_manager的add和find权限
    allow system_app cookoo_service:service_manager { add find };
    ```
@@ -252,7 +260,7 @@ chr_file - 字符设备 file - 普通文件 dir - 目录
    ```
    type cookoosvc, domain;
    type cookoosvc_exec, exec_type, file_type;
-   
+
    init_daemon_domain(cookoosvc)
    ```
 

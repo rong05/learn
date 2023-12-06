@@ -1,4 +1,12 @@
-# Binder Driver探索
+---
+title: "Binder Driver探索"
+date:  2023-12-06T10:36:27+08:00
+draft: true
+categories: [android]
+tags:
+  - android
+  - binder
+---
 
 ## binder驱动的初始化
 
@@ -43,7 +51,7 @@ static int __init binder_init(void)
             NULL,
             &binder_state_fops);
     // 创建/sys/kernel/debug/binder/stats文件用于记录统计信息，
-    //并注册操作函数binder_stats_fops。     
+    //并注册操作函数binder_stats_fops。
     debugfs_create_file("stats",
             0444,
             binder_debugfs_dir_entry_root,
@@ -198,7 +206,7 @@ const struct file_operations binder_fops = {
 
 用户态的程序调用Kernel层驱动是需要陷入内核态，进行系统调用(`syscall`)，比如打开Binder驱动方法的调用链为： open-> __open() -> binder_open()。通过`binder_fops`的定义得出以下调用规则；
 
-![binder_syscall](./img/binder_syscall.png)
+![binder_syscall](./../img/binder_syscall.png)
 
 [图片来源](http://gityuan.com/2015/11/01/binder-driver/)
 
@@ -217,7 +225,7 @@ static int binder_open(struct inode *nodp, struct file *filp)
 
   binder_debug(BINDER_DEBUG_OPEN_CLOSE, "%s: %d:%d\n", __func__,
          current->group_leader->pid, current->pid);
-  //创建binder驱动中管理IPC和保存进程信息的根结构体  
+  //创建binder驱动中管理IPC和保存进程信息的根结构体
   proc = kzalloc(sizeof(*proc), GFP_KERNEL);
   if (proc == NULL)
     return -ENOMEM;
@@ -345,7 +353,7 @@ struct binder_proc {
   int pid;
   //相应进程的task结构体
   struct task_struct *tsk;
-  
+
   struct hlist_node deferred_work_node;
   int deferred_work;
   bool is_dead;
@@ -390,7 +398,7 @@ struct binder_alloc {
   struct rb_root allocated_buffers;
   //用于异步请求的空间
   size_t free_async_space;
-  //所有的pages指向物理内存页 
+  //所有的pages指向物理内存页
   struct binder_lru_page *pages;
   //映射的内核空间大小
   size_t buffer_size;
@@ -416,7 +424,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 
   if (proc->tsk != current->group_leader)
     return -EINVAL;
- 
+
   binder_debug(BINDER_DEBUG_OPEN_CLOSE,
          "%s: %d %lx-%lx (%ld K) vma %lx pagep %lx\n",
          __func__, proc->pid, vma->vm_start, vma->vm_end,
